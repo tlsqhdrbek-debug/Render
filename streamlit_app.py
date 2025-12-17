@@ -266,58 +266,80 @@ REPORT_SECTION_TEMPLATES = {
 def save_to_supabase(company_name, pdf_file, extracted_text, extracted_data, report_content=None):
     """Supabase에 데이터 저장"""
     if not supabase_client:
+        st.warning("⚠️ Supabase 클라이언트가 연결되지 않았습니다.")
         return None
     
     try:
         # 1. 기업 정보 저장
         company_data = {
             "company_name": company_name,
-            "industry": extracted_data.get("업종", "미분류")
+            "industry": extracted_data.get("업종") or extracted_data.get("산업분류") or "미분류"
         }
         company_response = supabase_client.table("companies").insert(company_data).execute()
         company_id = company_response.data[0]["id"]
+        st.info(f"✅ 기업 정보 저장 완료 (ID: {company_id})")
         
-        # 2. PDF 파일을 Storage에 저장
-        file_path = f"{company_id}/main.pdf"
-        pdf_file.seek(0)
-        supabase_client.storage.from_("company-pdfs").upload(
-            file_path,
-            pdf_file.read(),
-            {"content-type": "application/pdf"}
-        )
+        # 2. PDF 파일을 Storage에 저장 (선택사항 - 에러 발생 시 무시)
+        try:
+            file_path = f"{company_id}/main.pdf"
+            pdf_file.seek(0)
+            pdf_bytes = pdf_file.read()
+            supabase_client.storage.from_("company-pdfs").upload(
+                file_path,
+                pdf_bytes,
+                {"content-type": "application/pdf"}
+            )
+            file_size = len(pdf_bytes)
+            st.info("✅ PDF 파일 Storage 저장 완료")
+        except Exception as storage_error:
+            st.warning(f"⚠️ PDF Storage 저장 실패 (계속 진행): {storage_error}")
+            file_path = "not_stored"
+            file_size = 0
         
         # 3. PDF 파일 정보 저장
         pdf_data = {
             "company_id": company_id,
-            "file_name": pdf_file.name,
+            "file_name": getattr(pdf_file, 'name', 'unknown.pdf'),
             "file_type": "main",
             "storage_path": file_path,
-            "file_size": pdf_file.size,
+            "file_size": file_size,
             "extracted_text": extracted_text[:50000],  # 텍스트 크기 제한
             "pages_count": extracted_text.count("=== 페이지")
         }
         supabase_client.table("pdf_files").insert(pdf_data).execute()
+        st.info("✅ PDF 메타데이터 저장 완료")
         
         # 4. 추출된 데이터 저장
+        data_entries = []
         for field_name, field_value in extracted_data.items():
-            data_entry = {
+            data_entries.append({
                 "company_id": company_id,
                 "field_name": field_name,
-                "field_value": field_value
-            }
-            supabase_client.table("extracted_data").insert(data_entry).execute()
+                "field_value": str(field_value)[:5000]  # 길이 제한
+            })
+        
+        if data_entries:
+            supabase_client.table("extracted_data").insert(data_entries).execute()
+            st.info(f"✅ 추출 데이터 {len(data_entries)}개 저장 완료")
         
         # 5. 보고서 저장 (선택사항)
         if report_content:
             report_data = {
                 "company_id": company_id,
-                "report_content": report_content
+                "report_content": report_content[:100000]  # 크기 제한
             }
             supabase_client.table("reports").insert(report_data).execute()
+            st.info("✅ 보고서 저장 완료")
         
         return company_id
     except Exception as e:
-        st.error(f"Supabase 저장 실패: {e}")
+        import traceback
+        error_detail = traceback.format_exc()
+        st.error(f"❌ Supabase 저장 실패")
+        st.error(f"에러: {str(e)}")
+        with st.expander("상세 에러 로그"):
+            st.code(error_detail)
+        return None
         return None
 
 def load_companies_list():
