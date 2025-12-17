@@ -129,6 +129,21 @@ if os.getenv("OPENAI_API_KEY") and os.getenv("OPENAI_API_KEY") != "your-api-key-
 else:
     st.sidebar.warning("⚠️ .env에 OPENAI_API_KEY를 설정하세요")
 
+# Supabase 클라이언트 초기화
+supabase_client = None
+try:
+    from supabase import create_client, Client
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+    
+    if supabase_url and supabase_key:
+        supabase_client = create_client(supabase_url, supabase_key)
+        st.sidebar.success("✅ Supabase 연결됨")
+    else:
+        st.sidebar.info("ℹ️ Supabase 미연결 (환경변수 미설정)")
+except Exception as e:
+    st.sidebar.error(f"⚠️ Supabase 연결 실패: {e}")
+
 # 세션 스테이트 초기화
 if 'template' not in st.session_state:
     st.session_state.template = []
@@ -246,6 +261,88 @@ REPORT_SECTION_TEMPLATES = {
    - 대출 승인/조건/유의사항 제시 가능
    - 추출된 데이터 기반으로 객관적 판단"""
 }
+
+# Supabase 헬퍼 함수
+def save_to_supabase(company_name, pdf_file, extracted_text, extracted_data, report_content=None):
+    """Supabase에 데이터 저장"""
+    if not supabase_client:
+        return None
+    
+    try:
+        # 1. 기업 정보 저장
+        company_data = {
+            "company_name": company_name,
+            "industry": extracted_data.get("업종", "미분류")
+        }
+        company_response = supabase_client.table("companies").insert(company_data).execute()
+        company_id = company_response.data[0]["id"]
+        
+        # 2. PDF 파일을 Storage에 저장
+        file_path = f"{company_id}/main.pdf"
+        pdf_file.seek(0)
+        supabase_client.storage.from_("company-pdfs").upload(
+            file_path,
+            pdf_file.read(),
+            {"content-type": "application/pdf"}
+        )
+        
+        # 3. PDF 파일 정보 저장
+        pdf_data = {
+            "company_id": company_id,
+            "file_name": pdf_file.name,
+            "file_type": "main",
+            "storage_path": file_path,
+            "file_size": pdf_file.size,
+            "extracted_text": extracted_text[:50000],  # 텍스트 크기 제한
+            "pages_count": extracted_text.count("=== 페이지")
+        }
+        supabase_client.table("pdf_files").insert(pdf_data).execute()
+        
+        # 4. 추출된 데이터 저장
+        for field_name, field_value in extracted_data.items():
+            data_entry = {
+                "company_id": company_id,
+                "field_name": field_name,
+                "field_value": field_value
+            }
+            supabase_client.table("extracted_data").insert(data_entry).execute()
+        
+        # 5. 보고서 저장 (선택사항)
+        if report_content:
+            report_data = {
+                "company_id": company_id,
+                "report_content": report_content
+            }
+            supabase_client.table("reports").insert(report_data).execute()
+        
+        return company_id
+    except Exception as e:
+        st.error(f"Supabase 저장 실패: {e}")
+        return None
+
+def load_companies_list():
+    """저장된 기업 목록 불러오기"""
+    if not supabase_client:
+        return []
+    
+    try:
+        response = supabase_client.table("companies").select("*").order("created_at", desc=True).limit(50).execute()
+        return response.data
+    except Exception as e:
+        st.error(f"기업 목록 로드 실패: {e}")
+        return []
+
+def load_company_data(company_id):
+    """특정 기업의 추출된 데이터 불러오기"""
+    if not supabase_client:
+        return {}
+    
+    try:
+        response = supabase_client.table("extracted_data").select("*").eq("company_id", company_id).execute()
+        return {item["field_name"]: item["field_value"] for item in response.data}
+    except Exception as e:
+        st.error(f"데이터 로드 실패: {e}")
+        return {}
 
 # OCR Reader (lazy loading)
 _ocr_reader = None
@@ -623,6 +720,29 @@ st.markdown("")
 with st.sidebar:
     st.header("📝 템플릿 설정")
     
+    # 이전 분석 불러오기
+    if supabase_client:
+        st.markdown("---")
+        with st.expander("📂 이전 분석 불러오기"):
+            companies = load_companies_list()
+            if companies:
+                company_names = [f"{c['company_name']} ({c['created_at'][:10]})" for c in companies]
+                selected = st.selectbox("기업 선택", ["선택하세요..."] + company_names)
+                
+                if selected != "선택하세요...":
+                    idx = company_names.index(selected)
+                    company_id = companies[idx]["id"]
+                    
+                    if st.button("불러오기", type="primary"):
+                        loaded_data = load_company_data(company_id)
+                        if loaded_data:
+                            st.session_state.extracted_data = loaded_data
+                            st.success("✅ 데이터 로드 완료!")
+                            st.rerun()
+            else:
+                st.info("저장된 분석이 없습니다.")
+        st.markdown("---")
+    
     # 추천 키워드
     st.subheader("🎯 추천 키워드")
     
@@ -790,6 +910,19 @@ with tab2:
                         field_names = [field['name'] for field in st.session_state.template]
                         extracted_data = extract_all_keywords_batch(pdf_text, field_names)
                         st.session_state.extracted_data = extracted_data
+                    
+                    # Supabase에 저장
+                    if supabase_client:
+                        with st.spinner("💾 Supabase에 저장 중..."):
+                            company_name = extracted_data.get("회사명") or extracted_data.get("기업명") or "Unknown"
+                            company_id = save_to_supabase(
+                                company_name=company_name,
+                                pdf_file=uploaded_file,
+                                extracted_text=pdf_text,
+                                extracted_data=extracted_data
+                            )
+                            if company_id:
+                                st.success("✅ Supabase 저장 완료!")
                     
                     # 결과 표시 - Gradio 스타일로
                     st.markdown("---")
