@@ -1563,8 +1563,30 @@ with tab3:
         st.warning("⚠️ 먼저 '데이터 추출' 탭에서 PDF 데이터를 추출하세요.")
     else:
         st.markdown("### 📊 추출된 데이터 확인")
-        for key, value in st.session_state.extracted_data.items():
-            st.markdown(f"**{key}**: {value}")
+        
+        # 템플릿 기준으로 표시 (템플릿에 있는 키워드만)
+        if st.session_state.template:
+            displayed_count = 0
+            for field in st.session_state.template:
+                field_name = field['name']
+                if field_name in st.session_state.extracted_data:
+                    value = st.session_state.extracted_data[field_name]
+                    st.markdown(f"**{field_name}**: {value}")
+                    displayed_count += 1
+            
+            # 템플릿에 없는 키워드도 표시할지 확인
+            all_keys = set(st.session_state.extracted_data.keys())
+            template_keys = {field['name'] for field in st.session_state.template}
+            extra_keys = all_keys - template_keys
+            
+            if extra_keys:
+                with st.expander(f"➕ 템플릿에 없는 추가 데이터 ({len(extra_keys)}개)"):
+                    for key in extra_keys:
+                        st.markdown(f"**{key}**: {st.session_state.extracted_data[key]}")
+        else:
+            # 템플릿이 없으면 모든 데이터 표시
+            for key, value in st.session_state.extracted_data.items():
+                st.markdown(f"**{key}**: {value}")
         
         st.markdown("---")
         
