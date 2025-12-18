@@ -1,0 +1,20 @@
+# ============================================
+# 로컬 PC용 OCR 서버 requirements
+# ============================================
+
+# FastAPI 및 서버
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# OCR
+easyocr==1.7.1
+torch==2.1.0
+torchvision==0.16.0
+
+# 이미지 처리
+Pillow==10.1.0
+numpy==1.24.3
+
+# PDF 처리 (선택)
+PyMuPDF==1.23.8

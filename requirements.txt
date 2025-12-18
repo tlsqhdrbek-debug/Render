@@ -6,3 +6,4 @@ numpy
 supabase
 python-dotenv
 tiktoken
+requests

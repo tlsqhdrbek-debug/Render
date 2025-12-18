@@ -560,20 +560,41 @@ def retrieve_relevant_context(query, company_id=None, max_tokens=3000):
     
     return "\n\n---\n\n".join(context_parts)
 
-# OCR Reader (lazy loading)
+# ============================================
+# 원격 OCR API 연동
+# ============================================
+import requests
+
+# 환경 변수에서 OCR API 설정 가져오기
+OCR_API_URL = os.getenv("OCR_API_URL")  # 예: https://abc123.ngrok.io
+OCR_API_KEY = os.getenv("OCR_API_KEY")  # 예: your-secret-ocr-key-12345
+
+def check_ocr_api_available():
+    """OCR API 서버 연결 확인"""
+    if not OCR_API_URL or not OCR_API_KEY:
+        return False
+    
+    try:
+        response = requests.get(f"{OCR_API_URL}/health", timeout=3)
+        return response.status_code == 200
+    except:
+        return False
+
+# OCR Reader (lazy loading) - 로컬 폴백용
 _ocr_reader = None
 
 def get_ocr_reader():
-    """OCR Reader를 lazy loading으로 가져오기"""
+    """OCR Reader를 lazy loading으로 가져오기 (로컬 폴백)"""
     global _ocr_reader
     if _ocr_reader is None:
         import easyocr
         _ocr_reader = easyocr.Reader(['ko', 'en'], gpu=False)
     return _ocr_reader
 
-def extract_text_from_pdf(pdf_file, max_pages=5):
+def extract_text_from_pdf(pdf_file, max_pages=50, use_ocr=False):
     """PDF에서 텍스트 추출"""
     try:
+        pdf_file.seek(0)
         doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
         num_pages = min(len(doc), max_pages)
         
@@ -583,25 +604,103 @@ def extract_text_from_pdf(pdf_file, max_pages=5):
             page_text = page.get_text()
             text += f"\n\n=== 페이지 {page_num+1} ===\n\n{page_text}"
         
-        if len(text.strip()) > 100:
+        # 텍스트가 충분하고 OCR 요청 안 했으면 그대로 반환
+        if len(text.strip()) > 100 and not use_ocr:
             doc.close()
             return text, num_pages
         
-        # OCR 폴백 (텍스트가 부족한 경우)
-        st.warning("텍스트 추출량이 적어 OCR을 사용합니다...")
-        return extract_text_with_easyocr(pdf_file, max_pages)
+        # OCR 사용
+        if use_ocr or len(text.strip()) < 100:
+            if len(text.strip()) < 100:
+                st.warning("텍스트 추출량이 적어 OCR을 사용합니다...")
+            else:
+                st.info("🔍 OCR 강화 모드로 재추출합니다...")
+            
+            # 원격 OCR API 시도
+            if check_ocr_api_available():
+                st.info("☁️ 원격 OCR API 사용 (빠름)")
+                doc.close()
+                pdf_file.seek(0)
+                return extract_text_with_remote_ocr(pdf_file, max_pages)
+            else:
+                # 로컬 OCR 폴백
+                st.warning("⚠️ 원격 OCR 연결 실패, 로컬 OCR 사용 (느림)")
+                doc.close()
+                pdf_file.seek(0)
+                return extract_text_with_easyocr(pdf_file, max_pages)
+        
+        doc.close()
+        return text, num_pages
         
     except Exception as e:
         st.error(f"PDF 읽기 오류: {e}")
         return "", 0
 
-def extract_text_with_easyocr(pdf_file, max_pages=5):
-    """EasyOCR로 텍스트 추출"""
+def extract_text_with_remote_ocr(pdf_file, max_pages=50):
+    """원격 OCR API로 텍스트 추출 (빠름!)"""
+    if not OCR_API_URL or not OCR_API_KEY:
+        st.error("OCR API 설정이 없습니다.")
+        return "", 0
+    
+    try:
+        pdf_file.seek(0)
+        doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+        num_pages = min(len(doc), max_pages)
+        
+        text = ""
+        progress_bar = st.progress(0)
+        
+        for page_num in range(num_pages):
+            page = doc[page_num]
+            # PDF 페이지를 고해상도 이미지로 변환
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img_bytes = pix.tobytes("png")
+            
+            # 원격 OCR API 호출
+            try:
+                files = {"file": (f"page_{page_num}.png", img_bytes, "image/png")}
+                headers = {"X-API-Key": OCR_API_KEY}
+                
+                response = requests.post(
+                    f"{OCR_API_URL}/ocr",
+                    files=files,
+                    headers=headers,
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    page_text = result.get("text", "")
+                    text += f"\n\n=== 페이지 {page_num+1} ===\n\n{page_text}"
+                    st.success(f"✅ 페이지 {page_num+1}/{num_pages} 완료")
+                else:
+                    st.warning(f"⚠️ 페이지 {page_num+1} OCR 실패: {response.status_code}")
+                    
+            except requests.Timeout:
+                st.error(f"⏱️ 페이지 {page_num+1} 타임아웃")
+            except Exception as e:
+                st.error(f"❌ 페이지 {page_num+1} 오류: {e}")
+            
+            # 진행률 업데이트
+            progress_bar.progress((page_num + 1) / num_pages)
+        
+        progress_bar.empty()
+        doc.close()
+        return text, num_pages
+        
+    except Exception as e:
+        st.error(f"원격 OCR 오류: {e}")
+        return "", 0
+
+def extract_text_with_easyocr(pdf_file, max_pages=50):
+    """로컬 EasyOCR로 텍스트 추출 (느림)"""
     text = ""
     try:
         pdf_file.seek(0)
         doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
         num_pages = min(len(doc), max_pages)
+        
+        progress_bar = st.progress(0)
         
         for page_num in range(num_pages):
             page = doc[page_num]
@@ -615,11 +714,14 @@ def extract_text_with_easyocr(pdf_file, max_pages=5):
             ocr_result = ocr_reader.readtext(img_array, detail=0, paragraph=True)
             page_text = "\n".join(ocr_result)
             text += f"\n\n=== 페이지 {page_num+1} ===\n\n{page_text}"
+            
+            progress_bar.progress((page_num + 1) / num_pages)
         
+        progress_bar.empty()
         doc.close()
         return text, num_pages
     except Exception as e:
-        st.error(f"OCR 오류: {e}")
+        st.error(f"로컬 OCR 오류: {e}")
         return "", 0
 
 def extract_all_keywords_batch(text, field_names):
@@ -1099,9 +1201,22 @@ with tab2:
     st.subheader("🔍 데이터 추출")
     st.info("PDF 파일을 업로드하고 AI가 자동으로 정보를 추출합니다")
     
+    # OCR API 상태 표시
+    if check_ocr_api_available():
+        st.success("☁️ 원격 OCR API 연결됨 - 빠른 처리 가능!")
+    else:
+        st.warning("⚠️ 원격 OCR API 미연결 - PyMuPDF만 사용 (또는 로컬 OCR)")
+    
     # 메인 PDF 업로드
     st.markdown("### 📄 기업 보고서 (필수)")
     uploaded_file = st.file_uploader("기업 사업보고서 PDF 업로드", type=['pdf'], key="main_pdf")
+    
+    # OCR 옵션
+    use_ocr_mode = st.checkbox(
+        "🔍 OCR 강화 모드 (표/그래프 포함, 느릴 수 있음)",
+        value=False,
+        help="텍스트가 부족하거나 표/그래프가 많은 PDF에 사용하세요"
+    )
     
     # 참고자료 PDF 업로드 (RAG)
     st.markdown("---")
@@ -1129,7 +1244,7 @@ with tab2:
         else:
             with st.spinner("📄 PDF 처리 중..."):
                 # 메인 PDF 텍스트 추출
-                pdf_text, num_pages = extract_text_from_pdf(uploaded_file, max_pages=5)
+                pdf_text, num_pages = extract_text_from_pdf(uploaded_file, max_pages=50, use_ocr=use_ocr_mode)
                 st.session_state.pdf_text = pdf_text
                 
                 # 참고자료 PDF 처리
@@ -1137,7 +1252,7 @@ with tab2:
                 if reference_files:
                     with st.spinner(f"📚 참고자료 {len(reference_files)}개 처리 중..."):
                         for ref_file in reference_files:
-                            ref_text, ref_pages = extract_text_from_pdf(ref_file, max_pages=10)
+                            ref_text, ref_pages = extract_text_from_pdf(ref_file, max_pages=50, use_ocr=use_ocr_mode)
                             if ref_text:
                                 st.session_state.reference_pdfs[ref_file.name] = ref_text
                                 st.success(f"✅ {ref_file.name} 처리 완료 ({ref_pages}페이지, {len(ref_text)}자)")
@@ -1182,12 +1297,12 @@ with tab2:
                     
                     # 원본 텍스트 표시
                     st.markdown("---")
-                    st.markdown("### 📄 추출된 원본 텍스트 (처음 1000자)")
+                    st.markdown("### 📄 추출된 원본 텍스트 (전체)")
                     st.markdown(f"""
                     <div style='background: #f8fafc; padding: 15px; border-radius: 8px; 
                     font-family: monospace; font-size: 13px; line-height: 1.6; 
-                    max-height: 400px; overflow-y: auto;'>
-                    {pdf_text[:1000]}...
+                    max-height: 600px; overflow-y: auto;'>
+                    {pdf_text}
                     </div>
                     """, unsafe_allow_html=True)
                 else:
@@ -1210,12 +1325,12 @@ with tab2:
             """, unsafe_allow_html=True)
         
         st.markdown("---")
-        st.markdown("### 📄 추출된 원본 텍스트 (처음 1000자)")
+        st.markdown("### 📄 추출된 원본 텍스트 (전체)")
         st.markdown(f"""
         <div style='background: #f8fafc; padding: 15px; border-radius: 8px; 
         font-family: monospace; font-size: 13px; line-height: 1.6; 
-        max-height: 400px; overflow-y: auto;'>
-        {st.session_state.pdf_text[:1000]}...
+        max-height: 600px; overflow-y: auto;'>
+        {st.session_state.pdf_text}
         </div>
         """, unsafe_allow_html=True)
 
