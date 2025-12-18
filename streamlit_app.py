@@ -145,6 +145,13 @@ try:
 except Exception as e:
     st.sidebar.error(f"⚠️ Supabase 연결 실패: {e}")
 
+# Upstage API 키 확인
+UPSTAGE_API_KEY = os.getenv("UPSTAGE_API_KEY")
+if UPSTAGE_API_KEY and UPSTAGE_API_KEY != "your-upstage-api-key-here":
+    st.sidebar.success("✅ Upstage Document Parse 연결됨")
+else:
+    st.sidebar.info("ℹ️ Upstage API 미설정 (기본 텍스트 추출)")
+
 # 세션 스테이트 초기화
 if 'template' not in st.session_state:
     st.session_state.template = []
@@ -171,6 +178,8 @@ if 'show_template_editor' not in st.session_state:
     st.session_state.show_template_editor = False
 if 'reference_pdfs' not in st.session_state:
     st.session_state.reference_pdfs = {}  # {filename: extracted_text}
+if 'structured_data' not in st.session_state:
+    st.session_state.structured_data = None  # Upstage Parse 구조화 데이터
 
 # 보고서 섹션별 작성 지침 정의
 REPORT_SECTION_TEMPLATES = {
@@ -565,8 +574,7 @@ def retrieve_relevant_context(query, company_id=None, max_tokens=3000):
 # ============================================
 import requests
 
-# Upstage API 설정
-UPSTAGE_API_KEY = os.getenv("UPSTAGE_API_KEY")
+# Upstage API URL (API 키는 위에서 이미 로드됨)
 UPSTAGE_API_URL = "https://api.upstage.ai/v1/document-ai/document-parse"
 
 def check_upstage_available():
@@ -676,14 +684,53 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
         text = content.get("text", "")
         html = content.get("html", "")
         
-        # 페이지별 정보
+        # 페이지별 정보와 요소 추출
         pages = result.get("pages", [])
         num_pages = len(pages)
         
+        # 구조화된 데이터 추출 (표, 제목, 리스트 등)
+        structured_elements = {
+            "tables": [],
+            "headings": [],
+            "paragraphs": [],
+            "lists": []
+        }
+        
+        for page_data in pages[:max_pages]:
+            elements = page_data.get("elements", [])
+            for element in elements:
+                elem_type = element.get("category", "")
+                elem_content = element.get("text", "")
+                
+                if "table" in elem_type.lower():
+                    structured_elements["tables"].append({
+                        "page": page_data.get("page"),
+                        "content": elem_content,
+                        "html": element.get("html", "")
+                    })
+                elif "heading" in elem_type.lower() or "title" in elem_type.lower():
+                    structured_elements["headings"].append({
+                        "page": page_data.get("page"),
+                        "content": elem_content
+                    })
+                elif "list" in elem_type.lower():
+                    structured_elements["lists"].append({
+                        "page": page_data.get("page"),
+                        "content": elem_content
+                    })
+                else:
+                    structured_elements["paragraphs"].append({
+                        "page": page_data.get("page"),
+                        "content": elem_content
+                    })
+        
         # 표 정보 추출 (HTML에서)
-        table_count = html.count("<table>") if html else 0
+        table_count = len(structured_elements["tables"])
         
         st.success(f"✅ Upstage 분석 완료: {num_pages}페이지, {len(text)}자, 표 {table_count}개 인식")
+        
+        # 세션에 구조화된 데이터 저장
+        st.session_state.structured_data = structured_elements
         
         # 페이지별 텍스트 구조화
         structured_text = ""
@@ -735,8 +782,8 @@ def extract_text_with_easyocr(pdf_file, max_pages=50):
         st.error(f"로컬 OCR 오류: {e}")
         return "", 0
 
-def extract_all_keywords_batch(text, field_names):
-    """배치 방식으로 모든 키워드를 한 번에 추출 (토큰 절감)"""
+def extract_all_keywords_batch(text, field_names, structured_data=None):
+    """배치 방식으로 모든 키워드를 한 번에 추출 (구조화된 데이터 우선 활용)"""
     if not openai_client:
         # API 없으면 개별 방식으로 폴백
         result = {}
@@ -745,25 +792,46 @@ def extract_all_keywords_batch(text, field_names):
         return result
     
     try:
+        # 구조화된 데이터가 있으면 우선 활용
+        context_info = ""
+        if structured_data:
+            # 표 데이터 요약
+            if structured_data.get("tables"):
+                table_summary = f"\n\n[구조화된 표 데이터 {len(structured_data['tables'])}개]\n"
+                for idx, table in enumerate(structured_data['tables'][:3]):  # 최대 3개
+                    table_summary += f"\n표 {idx+1} (페이지 {table['page']}):\n{table['content'][:500]}\n"
+                context_info += table_summary
+            
+            # 주요 제목 요약
+            if structured_data.get("headings"):
+                heading_summary = f"\n\n[문서 구조 - 주요 제목]\n"
+                for heading in structured_data['headings'][:10]:  # 최대 10개
+                    heading_summary += f"- {heading['content']}\n"
+                context_info += heading_summary
+        
         # 텍스트가 너무 길면 앞부분만 사용
-        text_preview = text[:4000]
+        text_preview = text[:3000] if not context_info else text[:2000]
         
         # 모든 필드를 한 번에 요청
         fields_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(field_names)])
         
-        prompt = f"""다음 텍스트에서 아래 항목들에 해당하는 정보를 찾아서 정확하게 추출하세요.
+        prompt = f"""다음 문서에서 아래 항목들에 해당하는 정보를 찾아서 정확하게 추출하세요.
+
+{context_info}
 
 텍스트:
+
 {text_preview}
 
 추출할 항목:
 {fields_list}
 
 요구사항:
-1. 각 항목별로 관련된 모든 정보를 추출
-2. 정보가 없으면 "정보 없음"이라고만 응답
-3. 원문의 표현을 최대한 유지
-4. 반드시 다음 형식으로 답변 (각 항목은 새 줄에):
+1. 표 데이터에서 수치 정보 우선 추출
+2. 각 항목별로 관련된 모든 정보를 추출
+3. 정보가 없으면 "정보 없음"이라고만 응답
+4. 원문의 표현을 최대한 유지
+5. 반드시 다음 형식으로 답변 (각 항목은 새 줄에):
 
 [항목명]: 추출된 내용
 
@@ -905,8 +973,8 @@ def extract_keyword_simple(text, field_name):
     
     return result[0] if result else "정보 없음"
 
-def generate_report_with_openai(data_dict, report_sections=None, model="gpt-4o-mini", company_id=None, use_rag=True):
-    """RAG 기반 OpenAI API로 체계적인 기업 분석 보고서 생성"""
+def generate_report_with_openai(data_dict, report_sections=None, model="gpt-4o-mini", company_id=None, use_rag=True, structured_data=None):
+    """RAG 기반 + 구조화된 데이터 활용 OpenAI API로 체계적인 기업 분석 보고서 생성"""
     if not openai_client:
         return "❌ OpenAI API 키를 .env 파일에 설정하세요."
     
@@ -971,6 +1039,23 @@ def generate_report_with_openai(data_dict, report_sections=None, model="gpt-4o-m
                 rag_context = "\n\n**🔍 관련 문서 컨텍스트 (벡터 검색 결과):**\n" + "\n\n".join(retrieved_contexts[:2])  # 상위 2개만
                 st.success(f"✅ {len(retrieved_contexts)}개 관련 컨텍스트 검색 완료")
     
+    # 구조화된 데이터 컨텍스트 추가
+    structured_context = ""
+    if structured_data:
+        structured_context = "\n\n**📊 문서 구조 정보 (Upstage Parse):**\n"
+        
+        # 표 데이터 요약
+        if structured_data.get("tables"):
+            structured_context += f"\n[표 데이터 {len(structured_data['tables'])}개 인식]\n"
+            for idx, table in enumerate(structured_data['tables'][:5]):
+                structured_context += f"\n표 {idx+1} (페이지 {table['page']}):\n{table['content'][:800]}\n"
+        
+        # 문서 구조
+        if structured_data.get("headings"):
+            structured_context += f"\n[문서 구조 - 주요 섹션]\n"
+            for heading in structured_data['headings'][:15]:
+                structured_context += f"- {heading['content']}\n"
+    
     # 참고자료 텍스트 추가 (기존 방식)
     reference_context = ""
     if st.session_state.get('reference_pdfs'):
@@ -989,12 +1074,16 @@ def generate_report_with_openai(data_dict, report_sections=None, model="gpt-4o-m
 
 **PDF에 없는 정보:** {missing_fields_text}
 
+{structured_context}
+
 {rag_context}
 
 {reference_context}
 
 **보고서 작성 지침:**
 {report_template}
+
+**중요: 표 데이터의 수치를 정확하게 인용하고, 문서 구조를 참고하여 체계적으로 작성하세요.**
 
 **보고서:**"""
         
@@ -1271,10 +1360,14 @@ with tab2:
                 if pdf_text:
                     st.success(f"✅ 메인 PDF {num_pages}페이지 처리 완료 (총 {len(pdf_text)}자 추출)")
                     
-                    # 배치 방식으로 키워드 추출 (토큰 절감)
+                    # 배치 방식으로 키워드 추출 (구조화된 데이터 활용)
                     with st.spinner("🔍 데이터 추출 중..."):
                         field_names = [field['name'] for field in st.session_state.template]
-                        extracted_data = extract_all_keywords_batch(pdf_text, field_names)
+                        # 구조화된 데이터가 있으면 전달
+                        structured_data = st.session_state.get('structured_data')
+                        if structured_data:
+                            st.info(f"📊 구조화된 데이터 활용: 표 {len(structured_data.get('tables', []))}개, 제목 {len(structured_data.get('headings', []))}개")
+                        extracted_data = extract_all_keywords_batch(pdf_text, field_names, structured_data=structured_data)
                         st.session_state.extracted_data = extracted_data
                     
                     # Supabase에 저장
@@ -1364,8 +1457,12 @@ with tab3:
             if st.button("📋 보고서 미리보기", type="secondary"):
                 with st.spinner("✨ OpenAI로 보고서 생성 중..."):
                     try:
+                        # 구조화된 데이터 전달
+                        structured_data = st.session_state.get('structured_data')
+                        
                         report = generate_report_with_openai(
-                            st.session_state.extracted_data
+                            st.session_state.extracted_data,
+                            structured_data=structured_data
                         )
                         
                         # 참고자료 정보 추가
@@ -1374,6 +1471,12 @@ with tab3:
                             report += f"\n\n---\n\n**📚 참고자료 목록:**\n"
                             for ref_file in ref_list:
                                 report += f"- {ref_file}\n"
+                        
+                        # 구조 정보 추가
+                        if structured_data:
+                            report += f"\n\n**📊 문서 분석 정보 (Upstage Parse):**\n"
+                            report += f"- 표 {len(structured_data.get('tables', []))}개 인식\n"
+                            report += f"- 섹션 {len(structured_data.get('headings', []))}개 구조화\n"
                         
                         # 보고서를 세션에 저장
                         st.session_state.report = report
