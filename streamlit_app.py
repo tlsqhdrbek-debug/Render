@@ -7,6 +7,7 @@ from openai import OpenAI
 from pathlib import Path
 from docx import Document
 from datetime import datetime
+import tiktoken
 
 # 페이지 설정
 st.set_page_config(
@@ -263,8 +264,8 @@ REPORT_SECTION_TEMPLATES = {
 }
 
 # Supabase 헬퍼 함수
-def save_to_supabase(company_name, pdf_file, extracted_text, extracted_data, report_content=None):
-    """Supabase에 데이터 저장"""
+def save_to_supabase(company_name, pdf_file, extracted_text, extracted_data, report_content=None, create_embeddings_flag=True):
+    """Supabase에 데이터 및 임베딩 저장"""
     if not supabase_client:
         st.warning("⚠️ Supabase 클라이언트가 연결되지 않았습니다.")
         return None
@@ -331,6 +332,22 @@ def save_to_supabase(company_name, pdf_file, extracted_text, extracted_data, rep
             supabase_client.table("reports").insert(report_data).execute()
             st.info("✅ 보고서 저장 완료")
         
+        # 6. 임베딩 생성 및 저장 (RAG 시스템)
+        if create_embeddings_flag and openai_client:
+            with st.spinner("🔮 임베딩 벡터 생성 중..."):
+                # 텍스트 청크 분할
+                chunks = split_text_into_chunks(extracted_text, max_tokens=500, overlap_tokens=50)
+                st.info(f"📦 {len(chunks)}개 청크 생성 완료")
+                
+                # 임베딩 생성
+                embeddings = create_embeddings(chunks)
+                
+                if embeddings:
+                    # Supabase에 저장
+                    save_embeddings_to_supabase(company_id, embeddings, file_type="main")
+                else:
+                    st.warning("⚠️ 임베딩 생성 실패 - 텍스트 검색은 제한됩니다")
+        
         return company_id
     except Exception as e:
         import traceback
@@ -339,7 +356,6 @@ def save_to_supabase(company_name, pdf_file, extracted_text, extracted_data, rep
         st.error(f"에러: {str(e)}")
         with st.expander("상세 에러 로그"):
             st.code(error_detail)
-        return None
         return None
 
 def load_companies_list():
@@ -365,6 +381,184 @@ def load_company_data(company_id):
     except Exception as e:
         st.error(f"데이터 로드 실패: {e}")
         return {}
+
+# ============================================
+# 임베딩 및 RAG 시스템
+# ============================================
+
+def split_text_into_chunks(text, max_tokens=500, overlap_tokens=50):
+    """텍스트를 토큰 기반으로 청크 분할"""
+    try:
+        encoding = tiktoken.encoding_for_model("text-embedding-3-small")
+        tokens = encoding.encode(text)
+        
+        chunks = []
+        start = 0
+        
+        while start < len(tokens):
+            end = start + max_tokens
+            chunk_tokens = tokens[start:end]
+            chunk_text = encoding.decode(chunk_tokens)
+            
+            chunks.append({
+                "text": chunk_text,
+                "start_pos": start,
+                "end_pos": end,
+                "token_count": len(chunk_tokens)
+            })
+            
+            start += (max_tokens - overlap_tokens)
+        
+        return chunks
+    except Exception as e:
+        st.error(f"청크 분할 실패: {e}")
+        # 폴백: 단순 문자 기반 분할
+        chunk_size = 2000
+        overlap = 200
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            chunk_text = text[start:end]
+            chunks.append({
+                "text": chunk_text,
+                "start_pos": start,
+                "end_pos": end,
+                "token_count": len(chunk_text) // 4  # 대략적 추정
+            })
+            start += (chunk_size - overlap)
+        return chunks
+
+def create_embeddings(text_chunks):
+    """OpenAI API로 임베딩 벡터 생성"""
+    if not openai_client:
+        st.error("OpenAI 클라이언트가 초기화되지 않았습니다.")
+        return []
+    
+    embeddings = []
+    try:
+        for i, chunk in enumerate(text_chunks):
+            response = openai_client.embeddings.create(
+                model="text-embedding-3-small",
+                input=chunk["text"]
+            )
+            embedding_vector = response.data[0].embedding
+            
+            embeddings.append({
+                "chunk_index": i,
+                "text": chunk["text"],
+                "embedding": embedding_vector,
+                "token_count": chunk["token_count"]
+            })
+            
+            # 진행 상황 표시
+            if (i + 1) % 10 == 0:
+                st.info(f"임베딩 생성 중... {i + 1}/{len(text_chunks)}")
+        
+        return embeddings
+    except Exception as e:
+        st.error(f"임베딩 생성 실패: {e}")
+        return []
+
+def save_embeddings_to_supabase(company_id, embeddings, file_type="main"):
+    """Supabase에 임베딩 벡터 저장"""
+    if not supabase_client:
+        st.warning("Supabase 클라이언트가 연결되지 않았습니다.")
+        return False
+    
+    try:
+        # 벡터 데이터 준비
+        vector_entries = []
+        for emb in embeddings:
+            vector_entries.append({
+                "company_id": company_id,
+                "file_type": file_type,
+                "chunk_index": emb["chunk_index"],
+                "chunk_text": emb["text"][:5000],  # 텍스트 길이 제한
+                "embedding": emb["embedding"],
+                "token_count": emb["token_count"]
+            })
+        
+        # 배치로 저장 (한 번에 너무 많으면 분할)
+        batch_size = 100
+        for i in range(0, len(vector_entries), batch_size):
+            batch = vector_entries[i:i + batch_size]
+            supabase_client.table("document_embeddings").insert(batch).execute()
+            st.info(f"벡터 저장 중... {min(i + batch_size, len(vector_entries))}/{len(vector_entries)}")
+        
+        st.success(f"✅ {len(vector_entries)}개 임베딩 벡터 저장 완료!")
+        return True
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        st.error(f"벡터 저장 실패: {str(e)}")
+        with st.expander("상세 에러 로그"):
+            st.code(error_detail)
+        return False
+
+def semantic_search(query, company_id=None, top_k=5, file_type=None):
+    """의미론적 유사도 검색"""
+    if not supabase_client or not openai_client:
+        st.warning("Supabase 또는 OpenAI 클라이언트가 연결되지 않았습니다.")
+        return []
+    
+    try:
+        # 쿼리 임베딩 생성
+        response = openai_client.embeddings.create(
+            model="text-embedding-3-small",
+            input=query
+        )
+        query_embedding = response.data[0].embedding
+        
+        # Supabase에서 유사도 검색 (RPC 함수 사용)
+        rpc_params = {
+            "query_embedding": query_embedding,
+            "match_threshold": 0.5,
+            "match_count": top_k
+        }
+        
+        # 회사 ID 필터
+        if company_id:
+            rpc_params["filter_company_id"] = company_id
+        
+        # 파일 타입 필터
+        if file_type:
+            rpc_params["filter_file_type"] = file_type
+        
+        # RPC 호출
+        result = supabase_client.rpc(
+            "match_documents",
+            rpc_params
+        ).execute()
+        
+        return result.data
+    except Exception as e:
+        st.error(f"유사도 검색 실패: {e}")
+        return []
+
+def retrieve_relevant_context(query, company_id=None, max_tokens=3000):
+    """RAG: 쿼리와 관련된 컨텍스트 추출"""
+    search_results = semantic_search(query, company_id=company_id, top_k=10)
+    
+    if not search_results:
+        return "관련 컨텍스트를 찾을 수 없습니다."
+    
+    # 토큰 제한 내에서 관련 텍스트 조합
+    context_parts = []
+    total_tokens = 0
+    
+    for result in search_results:
+        chunk_text = result.get("chunk_text", "")
+        similarity = result.get("similarity", 0)
+        token_count = result.get("token_count", 0)
+        
+        if total_tokens + token_count > max_tokens:
+            break
+        
+        context_parts.append(f"[유사도: {similarity:.3f}]\n{chunk_text}")
+        total_tokens += token_count
+    
+    return "\n\n---\n\n".join(context_parts)
 
 # OCR Reader (lazy loading)
 _ocr_reader = None
@@ -598,8 +792,8 @@ def extract_keyword_simple(text, field_name):
     
     return result[0] if result else "정보 없음"
 
-def generate_report_with_openai(data_dict, report_sections=None, model="gpt-4o-mini"):
-    """OpenAI API로 체계적인 기업 분석 보고서 생성"""
+def generate_report_with_openai(data_dict, report_sections=None, model="gpt-4o-mini", company_id=None, use_rag=True):
+    """RAG 기반 OpenAI API로 체계적인 기업 분석 보고서 생성"""
     if not openai_client:
         return "❌ OpenAI API 키를 .env 파일에 설정하세요."
     
@@ -642,7 +836,29 @@ def generate_report_with_openai(data_dict, report_sections=None, model="gpt-4o-m
     available_data_text = "\n".join(available_data)
     missing_fields_text = ", ".join(missing_fields) if missing_fields else "없음"
     
-    # 참고자료 텍스트 추가 (RAG)
+    # RAG: 의미론적 검색으로 관련 컨텍스트 가져오기
+    rag_context = ""
+    if use_rag and company_id and supabase_client:
+        with st.spinner("🔍 관련 문서 검색 중..."):
+            # 보고서 섹션별 쿼리 생성
+            queries = [
+                f"{company_name} 재무 정보 매출 영업이익",
+                f"{company_name} 사업 구조 제품 서비스",
+                f"{company_name} 경쟁사 시장 분석",
+                "리스크 요인 위험 요소"
+            ]
+            
+            retrieved_contexts = []
+            for query in queries:
+                context = retrieve_relevant_context(query, company_id=company_id, max_tokens=1000)
+                if context and context != "관련 컨텍스트를 찾을 수 없습니다.":
+                    retrieved_contexts.append(context)
+            
+            if retrieved_contexts:
+                rag_context = "\n\n**🔍 관련 문서 컨텍스트 (벡터 검색 결과):**\n" + "\n\n".join(retrieved_contexts[:2])  # 상위 2개만
+                st.success(f"✅ {len(retrieved_contexts)}개 관련 컨텍스트 검색 완료")
+    
+    # 참고자료 텍스트 추가 (기존 방식)
     reference_context = ""
     if st.session_state.get('reference_pdfs'):
         reference_texts = []
@@ -659,6 +875,8 @@ def generate_report_with_openai(data_dict, report_sections=None, model="gpt-4o-m
 {available_data_text}
 
 **PDF에 없는 정보:** {missing_fields_text}
+
+{rag_context}
 
 {reference_context}
 
