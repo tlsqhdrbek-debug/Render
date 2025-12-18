@@ -1461,7 +1461,8 @@ with tab3:
                         structured_data = st.session_state.get('structured_data')
                         
                         report = generate_report_with_openai(
-                            st.session_state.extracted_data,
+                            data_dict=st.session_state.extracted_data,
+                            report_sections=st.session_state.get('report_sections'),
                             structured_data=structured_data
                         )
                         
