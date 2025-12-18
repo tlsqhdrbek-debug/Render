@@ -341,7 +341,24 @@ def save_to_supabase(company_name, pdf_file, extracted_text, extracted_data, rep
             supabase_client.table("reports").insert(report_data).execute()
             st.info("✅ 보고서 저장 완료")
         
-        # 6. 임베딩 생성 및 저장 (RAG 시스템)
+        # 6. 구조화된 데이터 저장 (Upstage Parse 결과)
+        if st.session_state.get('structured_data'):
+            try:
+                import json
+                structured_json = json.dumps(st.session_state.structured_data, ensure_ascii=False)
+                
+                # companies 테이블에 structured_data 컬럼 추가 필요
+                # 일단 extracted_data 테이블에 특수 필드로 저장
+                supabase_client.table("extracted_data").insert({
+                    "company_id": company_id,
+                    "field_name": "__structured_data__",
+                    "field_value": structured_json[:50000]  # 크기 제한
+                }).execute()
+                st.info("✅ 구조화된 데이터 저장 완료 (재사용 가능)")
+            except Exception as e:
+                st.warning(f"⚠️ 구조화된 데이터 저장 실패: {e}")
+        
+        # 7. 임베딩 생성 및 저장 (RAG 시스템)
         if create_embeddings_flag and openai_client:
             with st.spinner("🔮 임베딩 벡터 생성 중..."):
                 # 텍스트 청크 분할
@@ -380,16 +397,34 @@ def load_companies_list():
         return []
 
 def load_company_data(company_id):
-    """특정 기업의 추출된 데이터 불러오기"""
+    """특정 기업의 추출된 데이터 및 구조화된 데이터 불러오기"""
     if not supabase_client:
-        return {}
+        return {}, None
     
     try:
         response = supabase_client.table("extracted_data").select("*").eq("company_id", company_id).execute()
-        return {item["field_name"]: item["field_value"] for item in response.data}
+        
+        extracted_data = {}
+        structured_data = None
+        
+        for item in response.data:
+            field_name = item["field_name"]
+            field_value = item["field_value"]
+            
+            # 구조화된 데이터 복원
+            if field_name == "__structured_data__":
+                try:
+                    import json
+                    structured_data = json.loads(field_value)
+                except:
+                    pass
+            else:
+                extracted_data[field_name] = field_value
+        
+        return extracted_data, structured_data
     except Exception as e:
         st.error(f"데이터 로드 실패: {e}")
-        return {}
+        return {}, None
 
 # ============================================
 # 임베딩 및 RAG 시스템
@@ -1176,10 +1211,15 @@ with st.sidebar:
                     company_id = companies[idx]["id"]
                     
                     if st.button("불러오기", type="primary"):
-                        loaded_data = load_company_data(company_id)
+                        loaded_data, loaded_structured_data = load_company_data(company_id)
                         if loaded_data:
                             # 추출된 데이터 로드
                             st.session_state.extracted_data = loaded_data
+                            
+                            # 구조화된 데이터 로드 (Upstage Parse 결과)
+                            if loaded_structured_data:
+                                st.session_state.structured_data = loaded_structured_data
+                                st.success(f"✅ 구조화된 데이터 복원 완료! (표 {len(loaded_structured_data.get('tables', []))}개)")
                             
                             # 템플릿 자동 생성 (키워드 복원)
                             st.session_state.template = []
@@ -1434,6 +1474,50 @@ with tab2:
         else:
             st.markdown("## 📂 불러온 분석 데이터")
             st.info("💡 이전에 분석한 데이터를 불러왔습니다. 바로 보고서 생성이 가능합니다!")
+            
+            # 구조화된 데이터가 있으면 추가 키워드 추출 버튼 표시
+            if st.session_state.get('structured_data'):
+                st.markdown("### 🔄 추가 분석")
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.info("📊 구조화된 문서 데이터가 있습니다. 새로운 키워드를 템플릿에 추가하고 버튼을 눌러보세요!")
+                with col2:
+                    if st.button("➕ 추가 키워드 추출", type="primary"):
+                        # 기존 템플릿과 추출된 데이터 비교
+                        template_fields = {field['name'] for field in st.session_state.template}
+                        existing_fields = set(st.session_state.extracted_data.keys())
+                        new_fields = list(template_fields - existing_fields)
+                        
+                        if new_fields:
+                            with st.spinner(f"🔍 {len(new_fields)}개 새 키워드 추출 중..."):
+                                # PDF 텍스트가 없으면 구조화된 데이터에서 텍스트 재구성
+                                if not st.session_state.pdf_text:
+                                    structured_data = st.session_state.structured_data
+                                    reconstructed_text = ""
+                                    
+                                    # 표 데이터 추가
+                                    for table in structured_data.get('tables', []):
+                                        reconstructed_text += f"\n{table['content']}\n"
+                                    
+                                    # 문단 데이터 추가
+                                    for para in structured_data.get('paragraphs', [])[:50]:
+                                        reconstructed_text += f"{para['content']}\n"
+                                    
+                                    st.session_state.pdf_text = reconstructed_text
+                                
+                                # 새 키워드만 추출
+                                new_extracted = extract_all_keywords_batch(
+                                    st.session_state.pdf_text,
+                                    new_fields,
+                                    structured_data=st.session_state.structured_data
+                                )
+                                
+                                # 기존 데이터에 병합
+                                st.session_state.extracted_data.update(new_extracted)
+                                st.success(f"✅ {len(new_fields)}개 키워드 추출 완료! (API 비용 절감)")
+                                st.rerun()
+                        else:
+                            st.warning("⚠️ 추출할 새 키워드가 없습니다. 템플릿에 키워드를 먼저 추가하세요!")
         
         st.markdown("### 🤖 추출된 정보")
         
