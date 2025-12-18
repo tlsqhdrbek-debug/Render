@@ -561,24 +561,17 @@ def retrieve_relevant_context(query, company_id=None, max_tokens=3000):
     return "\n\n---\n\n".join(context_parts)
 
 # ============================================
-# 원격 OCR API 연동
+# Upstage Document Parse API 연동
 # ============================================
 import requests
 
-# 환경 변수에서 OCR API 설정 가져오기
-OCR_API_URL = os.getenv("OCR_API_URL")  # 예: https://abc123.ngrok.io
-OCR_API_KEY = os.getenv("OCR_API_KEY")  # 예: your-secret-ocr-key-12345
+# Upstage API 설정
+UPSTAGE_API_KEY = os.getenv("UPSTAGE_API_KEY")
+UPSTAGE_API_URL = "https://api.upstage.ai/v1/document-ai/document-parse"
 
-def check_ocr_api_available():
-    """OCR API 서버 연결 확인"""
-    if not OCR_API_URL or not OCR_API_KEY:
-        return False
-    
-    try:
-        response = requests.get(f"{OCR_API_URL}/health", timeout=3)
-        return response.status_code == 200
-    except:
-        return False
+def check_upstage_available():
+    """Upstage API 키 설정 확인"""
+    return bool(UPSTAGE_API_KEY and UPSTAGE_API_KEY != "your-upstage-api-key-here")
 
 # OCR Reader (lazy loading) - 로컬 폴백용
 _ocr_reader = None
@@ -612,19 +605,19 @@ def extract_text_from_pdf(pdf_file, max_pages=50, use_ocr=False):
         # OCR 사용
         if use_ocr or len(text.strip()) < 100:
             if len(text.strip()) < 100:
-                st.warning("텍스트 추출량이 적어 OCR을 사용합니다...")
+                st.warning("텍스트 추출량이 적어 고급 분석을 사용합니다...")
             else:
-                st.info("🔍 OCR 강화 모드로 재추출합니다...")
+                st.info("🔍 표 구조 인식 모드로 재추출합니다...")
             
-            # 원격 OCR API 시도
-            if check_ocr_api_available():
-                st.info("☁️ 원격 OCR API 사용 (빠름)")
+            # Upstage API 시도
+            if check_upstage_available():
+                st.info("☁️ Upstage Document Parse 사용 (표 구조화 + OCR)")
                 doc.close()
                 pdf_file.seek(0)
-                return extract_text_with_remote_ocr(pdf_file, max_pages)
+                return extract_text_with_upstage(pdf_file, max_pages)
             else:
-                # 로컬 OCR 폴백
-                st.warning("⚠️ 원격 OCR 연결 실패, 로컬 OCR 사용 (느림)")
+                # 로컬 OCR 폴백 (Upstage 없을 때만)
+                st.warning("⚠️ Upstage API 미설정, 기본 OCR 사용")
                 doc.close()
                 pdf_file.seek(0)
                 return extract_text_with_easyocr(pdf_file, max_pages)
@@ -636,60 +629,78 @@ def extract_text_from_pdf(pdf_file, max_pages=50, use_ocr=False):
         st.error(f"PDF 읽기 오류: {e}")
         return "", 0
 
-def extract_text_with_remote_ocr(pdf_file, max_pages=50):
-    """원격 OCR API로 텍스트 추출 (빠름!)"""
-    if not OCR_API_URL or not OCR_API_KEY:
-        st.error("OCR API 설정이 없습니다.")
+def extract_text_with_upstage(pdf_file, max_pages=50):
+    """Upstage Document Parse API로 PDF 전체 분석 (표 구조화!)"""
+    if not UPSTAGE_API_KEY:
+        st.error("Upstage API 키가 설정되지 않았습니다.")
         return "", 0
     
     try:
         pdf_file.seek(0)
-        doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-        num_pages = min(len(doc), max_pages)
+        pdf_bytes = pdf_file.read()
         
-        text = ""
-        progress_bar = st.progress(0)
+        st.info("🚀 Upstage Document Parse로 PDF 분석 중... (표 구조 인식)")
         
-        for page_num in range(num_pages):
-            page = doc[page_num]
-            # PDF 페이지를 고해상도 이미지로 변환
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-            img_bytes = pix.tobytes("png")
-            
-            # 원격 OCR API 호출
-            try:
-                files = {"file": (f"page_{page_num}.png", img_bytes, "image/png")}
-                headers = {"X-API-Key": OCR_API_KEY}
-                
-                response = requests.post(
-                    f"{OCR_API_URL}/ocr",
-                    files=files,
-                    headers=headers,
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    page_text = result.get("text", "")
-                    text += f"\n\n=== 페이지 {page_num+1} ===\n\n{page_text}"
-                    st.success(f"✅ 페이지 {page_num+1}/{num_pages} 완료")
-                else:
-                    st.warning(f"⚠️ 페이지 {page_num+1} OCR 실패: {response.status_code}")
-                    
-            except requests.Timeout:
-                st.error(f"⏱️ 페이지 {page_num+1} 타임아웃")
-            except Exception as e:
-                st.error(f"❌ 페이지 {page_num+1} 오류: {e}")
-            
-            # 진행률 업데이트
-            progress_bar.progress((page_num + 1) / num_pages)
+        # Upstage API 호출
+        headers = {
+            "Authorization": f"Bearer {UPSTAGE_API_KEY}"
+        }
         
-        progress_bar.empty()
-        doc.close()
-        return text, num_pages
+        files = {
+            "document": (getattr(pdf_file, 'name', 'document.pdf'), pdf_bytes, "application/pdf")
+        }
         
+        # OCR 강제 사용 (이미지 기반 PDF도 처리)
+        data = {
+            "ocr": "force",
+            "output_formats": "text,html"  # 텍스트와 HTML 둘 다 요청
+        }
+        
+        response = requests.post(
+            UPSTAGE_API_URL,
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=120  # PDF 분석은 시간이 걸릴 수 있음
+        )
+        
+        if response.status_code != 200:
+            st.error(f"❌ Upstage API 오류: {response.status_code}")
+            st.error(f"상세: {response.text}")
+            return "", 0
+        
+        result = response.json()
+        
+        # 구조화된 텍스트 추출
+        content = result.get("content", {})
+        text = content.get("text", "")
+        html = content.get("html", "")
+        
+        # 페이지별 정보
+        pages = result.get("pages", [])
+        num_pages = len(pages)
+        
+        # 표 정보 추출 (HTML에서)
+        table_count = html.count("<table>") if html else 0
+        
+        st.success(f"✅ Upstage 분석 완료: {num_pages}페이지, {len(text)}자, 표 {table_count}개 인식")
+        
+        # 페이지별 텍스트 구조화
+        structured_text = ""
+        for i, page_data in enumerate(pages[:max_pages]):
+            page_num = page_data.get("page", i+1)
+            page_text = page_data.get("text", "")
+            structured_text += f"\n\n=== 페이지 {page_num} ===\n\n{page_text}"
+        
+        return structured_text if structured_text else text, min(num_pages, max_pages)
+        
+    except requests.Timeout:
+        st.error("⏱️ Upstage API 타임아웃 (대용량 PDF는 시간이 걸릴 수 있습니다)")
+        return "", 0
     except Exception as e:
-        st.error(f"원격 OCR 오류: {e}")
+        st.error(f"❌ Upstage API 오류: {e}")
+        import traceback
+        st.error(traceback.format_exc())
         return "", 0
 
 def extract_text_with_easyocr(pdf_file, max_pages=50):
@@ -1201,21 +1212,21 @@ with tab2:
     st.subheader("🔍 데이터 추출")
     st.info("PDF 파일을 업로드하고 AI가 자동으로 정보를 추출합니다")
     
-    # OCR API 상태 표시
-    if check_ocr_api_available():
-        st.success("☁️ 원격 OCR API 연결됨 - 빠른 처리 가능!")
+    # Upstage API 상태 표시
+    if check_upstage_available():
+        st.success("🚀 Upstage Document Parse 연결됨 - 표 구조 인식 가능!")
     else:
-        st.warning("⚠️ 원격 OCR API 미연결 - PyMuPDF만 사용 (또는 로컬 OCR)")
+        st.warning("⚠️ Upstage API 미설정 - 기본 텍스트 추출만 가능")
     
     # 메인 PDF 업로드
     st.markdown("### 📄 기업 보고서 (필수)")
     uploaded_file = st.file_uploader("기업 사업보고서 PDF 업로드", type=['pdf'], key="main_pdf")
     
-    # OCR 옵션
+    # 고급 분석 옵션
     use_ocr_mode = st.checkbox(
-        "🔍 OCR 강화 모드 (표/그래프 포함, 느릴 수 있음)",
+        "📊 표 구조 인식 모드 (Upstage Document Parse)",
         value=False,
-        help="텍스트가 부족하거나 표/그래프가 많은 PDF에 사용하세요"
+        help="표, 그래프가 많은 PDF에 사용하세요. 데이터를 구조화하여 추출합니다."
     )
     
     # 참고자료 PDF 업로드 (RAG)
