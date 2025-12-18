@@ -1178,8 +1178,20 @@ with st.sidebar:
                     if st.button("불러오기", type="primary"):
                         loaded_data = load_company_data(company_id)
                         if loaded_data:
+                            # 추출된 데이터 로드
                             st.session_state.extracted_data = loaded_data
-                            st.success("✅ 데이터 로드 완료!")
+                            
+                            # 템플릿 자동 생성 (키워드 복원)
+                            st.session_state.template = []
+                            for field_name in loaded_data.keys():
+                                # 숫자 관련 키워드는 숫자 타입, 나머지는 텍스트 타입
+                                field_type = "숫자" if any(keyword in field_name for keyword in ["매출", "이익", "비율", "YoY", "CAPEX", "ROE", "EBITDA", "부채", "현금"]) else "텍스트"
+                                st.session_state.template.append({
+                                    "name": field_name,
+                                    "type": field_type
+                                })
+                            
+                            st.success(f"✅ 데이터 로드 완료! ({len(loaded_data)}개 키워드)")
                             st.rerun()
             else:
                 st.info("저장된 분석이 없습니다.")
@@ -1412,31 +1424,52 @@ with tab2:
                 else:
                     st.error("❌ PDF에서 텍스트를 추출할 수 없습니다.")
     
-    # 이미 추출된 데이터가 있으면 표시
-    elif st.session_state.extracted_data and st.session_state.pdf_text:
+    # 이미 추출된 데이터가 있으면 표시 (새로 추출하거나 이전 분석 불러온 경우)
+    elif st.session_state.extracted_data:
         st.markdown("---")
-        st.markdown("## ✅ 처리 완료!")
-        st.markdown("### 🤖 AI가 자동으로 추출한 정보")
         
-        for field in st.session_state.template:
-            value = st.session_state.extracted_data.get(field['name'], "정보 없음")
-            st.markdown(f"**📌 {field['name']}**")
+        # 불러온 데이터인지 확인
+        if st.session_state.pdf_text:
+            st.markdown("## ✅ 처리 완료!")
+        else:
+            st.markdown("## 📂 불러온 분석 데이터")
+            st.info("💡 이전에 분석한 데이터를 불러왔습니다. 바로 보고서 생성이 가능합니다!")
+        
+        st.markdown("### 🤖 추출된 정보")
+        
+        # 템플릿에 키워드가 있으면 템플릿 순서대로, 없으면 전체 표시
+        if st.session_state.template:
+            for field in st.session_state.template:
+                value = st.session_state.extracted_data.get(field['name'], "정보 없음")
+                st.markdown(f"**📌 {field['name']}**")
+                st.markdown(f"""
+                <div style='padding: 10px; background: white; border-radius: 8px; 
+                margin-bottom: 15px; border: 1px solid #e2e8f0;'>
+                {value}
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            # 템플릿 없으면 모든 데이터 표시
+            for key, value in st.session_state.extracted_data.items():
+                st.markdown(f"**📌 {key}**")
+                st.markdown(f"""
+                <div style='padding: 10px; background: white; border-radius: 8px; 
+                margin-bottom: 15px; border: 1px solid #e2e8f0;'>
+                {value}
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # 원본 텍스트가 있을 때만 표시 (새로 추출한 경우)
+        if st.session_state.pdf_text:
+            st.markdown("---")
+            st.markdown("### 📄 추출된 원본 텍스트 (전체)")
             st.markdown(f"""
-            <div style='padding: 10px; background: white; border-radius: 8px; 
-            margin-bottom: 15px; border: 1px solid #e2e8f0;'>
-            {value}
+            <div style='background: #f8fafc; padding: 15px; border-radius: 8px; 
+            font-family: monospace; font-size: 13px; line-height: 1.6; 
+            max-height: 600px; overflow-y: auto;'>
+            {st.session_state.pdf_text}
             </div>
             """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        st.markdown("### 📄 추출된 원본 텍스트 (전체)")
-        st.markdown(f"""
-        <div style='background: #f8fafc; padding: 15px; border-radius: 8px; 
-        font-family: monospace; font-size: 13px; line-height: 1.6; 
-        max-height: 600px; overflow-y: auto;'>
-        {st.session_state.pdf_text}
-        </div>
-        """, unsafe_allow_html=True)
 
 with tab3:
     st.subheader("📄 보고서 생성")
