@@ -162,6 +162,59 @@ CREATE TRIGGER update_companies_updated_at
 -- ALTER TABLE document_embeddings ENABLE ROW LEVEL SECURITY;
 
 -- ============================================
+-- 9. 테스트 사용자 테이블 (로깅 시스템)
+-- ============================================
+CREATE TABLE IF NOT EXISTS test_users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    email TEXT,
+    session_id TEXT UNIQUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_test_users_session ON test_users(session_id);
+CREATE INDEX IF NOT EXISTS idx_test_users_created ON test_users(created_at DESC);
+
+-- ============================================
+-- 10. 테스트 세션 테이블
+-- ============================================
+CREATE TABLE IF NOT EXISTS test_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES test_users(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    company_name TEXT,
+    pdf_filename TEXT,
+    started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    completed_at TIMESTAMP WITH TIME ZONE,
+    status TEXT DEFAULT 'in_progress', -- 'in_progress', 'success', 'failed'
+    error_message TEXT,
+    total_execution_time_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_test_sessions_user ON test_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_test_sessions_session ON test_sessions(session_id);
+CREATE INDEX IF NOT EXISTS idx_test_sessions_status ON test_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_test_sessions_started ON test_sessions(started_at DESC);
+
+-- ============================================
+-- 11. 활동 로그 테이블 (상세 로그)
+-- ============================================
+CREATE TABLE IF NOT EXISTS activity_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id TEXT NOT NULL,
+    step TEXT NOT NULL, -- 'pdf_upload', 'keyword_extraction', 'data_extraction', 'report_generation', 'error'
+    status TEXT NOT NULL, -- 'started', 'success', 'failed'
+    details JSONB, -- 추출된 데이터, 에러 상세, 스택 트레이스 등
+    execution_time_ms INTEGER,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_logs_session ON activity_logs(session_id);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_step ON activity_logs(step);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_status ON activity_logs(status);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_created ON activity_logs(created_at DESC);
+
+-- ============================================
 -- 완료!
 -- ============================================
 -- 이제 다음 작업을 수행하세요:

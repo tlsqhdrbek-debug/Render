@@ -8,6 +8,12 @@ from pathlib import Path
 from docx import Document
 from datetime import datetime
 import tiktoken
+import json
+import traceback
+import time
+import uuid
+from functools import wraps
+import pandas as pd
 
 # 페이지 설정
 st.set_page_config(
@@ -180,6 +186,144 @@ if 'reference_pdfs' not in st.session_state:
     st.session_state.reference_pdfs = {}  # {filename: extracted_text}
 if 'structured_data' not in st.session_state:
     st.session_state.structured_data = None  # Upstage Parse 구조화 데이터
+
+# 로깅 시스템용 세션 스테이트
+if 'user_name' not in st.session_state:
+    st.session_state.user_name = None
+if 'user_email' not in st.session_state:
+    st.session_state.user_email = None
+if 'session_id' not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+if 'current_test_session_id' not in st.session_state:
+    st.session_state.current_test_session_id = None
+
+# ============================================
+# 로깅 시스템
+# ============================================
+
+def create_or_get_test_user(name, email=None):
+    """테스트 사용자 생성 또는 조회"""
+    if not supabase_client:
+        return None
+    
+    try:
+        # 이름과 이메일로 기존 사용자 확인
+        if email:
+            response = supabase_client.table("test_users").select("*").eq("name", name).eq("email", email).execute()
+        else:
+            response = supabase_client.table("test_users").select("*").eq("name", name).is_("email", "null").execute()
+        
+        if response.data:
+            return response.data[0]
+        
+        # 새 사용자 생성
+        user_data = {
+            "name": name,
+            "email": email
+        }
+        response = supabase_client.table("test_users").insert(user_data).execute()
+        return response.data[0] if response.data else None
+    except Exception as e:
+        st.error(f"사용자 생성 실패: {e}")
+        return None
+
+def start_test_session(user_id, company_name, pdf_filename):
+    """테스트 세션 시작"""
+    if not supabase_client:
+        return None
+    
+    try:
+        session_data = {
+            "user_id": user_id,
+            "company_name": company_name,
+            "pdf_filename": pdf_filename,
+            "status": "in_progress"
+        }
+        response = supabase_client.table("test_sessions").insert(session_data).execute()
+        session_id = response.data[0]["id"] if response.data else None
+        st.session_state.current_test_session_id = session_id
+        return session_id
+    except Exception as e:
+        st.error(f"세션 시작 실패: {e}")
+        return None
+
+def complete_test_session(status, error_message=None, execution_time_ms=None):
+    """테스트 세션 완료"""
+    if not supabase_client or not st.session_state.current_test_session_id:
+        return
+    
+    try:
+        update_data = {
+            "completed_at": datetime.now().isoformat(),
+            "status": status
+        }
+        if error_message:
+            update_data["error_message"] = error_message
+        # execution_time_ms는 저장하지 않음 (테이블에 필드 없음)
+        
+        supabase_client.table("test_sessions").update(update_data).eq("id", st.session_state.current_test_session_id).execute()
+    except Exception as e:
+        st.error(f"세션 완료 기록 실패: {e}")
+
+def log_activity(step, status, details=None, execution_time_ms=None):
+    """활동 로그 기록"""
+    if not supabase_client or not st.session_state.current_test_session_id:
+        return
+    
+    try:
+        log_data = {
+            "session_id": st.session_state.current_test_session_id,
+            "step": step,
+            "status": status,
+            "details": details if details else {},
+            "execution_time_ms": execution_time_ms
+        }
+        supabase_client.table("activity_logs").insert(log_data).execute()
+    except Exception as e:
+        print(f"로그 기록 실패: {e}")  # st.error 대신 print 사용 (로그 기록 실패는 사용자에게 노출 안 함)
+
+def log_error(step, error, stack_trace=None):
+    """에러 로그 기록"""
+    if not supabase_client or not st.session_state.current_test_session_id:
+        return
+    
+    try:
+        error_details = {
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "stack_trace": stack_trace or traceback.format_exc()
+        }
+        
+        log_data = {
+            "session_id": st.session_state.current_test_session_id,
+            "step": step,
+            "status": "failed",
+            "details": error_details
+        }
+        supabase_client.table("activity_logs").insert(log_data).execute()
+    except Exception as e:
+        print(f"에러 로그 기록 실패: {e}")
+
+def log_execution_time(step_name):
+    """실행 시간 측정 데코레이터"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.time()
+            log_activity(step_name, "started")
+            
+            try:
+                result = func(*args, **kwargs)
+                execution_time_ms = int((time.time() - start_time) * 1000)
+                log_activity(step_name, "success", execution_time_ms=execution_time_ms)
+                return result
+            except Exception as e:
+                execution_time_ms = int((time.time() - start_time) * 1000)
+                log_error(step_name, e)
+                log_activity(step_name, "failed", execution_time_ms=execution_time_ms)
+                raise
+        return wrapper
+    return decorator
 
 # 보고서 섹션별 작성 지침 정의
 REPORT_SECTION_TEMPLATES = {
@@ -1308,8 +1452,99 @@ with st.sidebar:
         st.session_state.template = []
         st.rerun()
 
+# ============================================
+# 메인 화면 - 사용자 로그인 체크
+# ============================================
+
+# 사용자 정보가 없으면 로그인 화면 표시
+if not st.session_state.user_name:
+    st.markdown("""
+    <div style='text-align: center; padding: 50px 20px;'>
+        <h1>🚀 기업 분석 보고서 생성기</h1>
+        <p style='font-size: 18px; color: #666; margin-bottom: 40px;'>
+            AI 기반 자동 분석 및 보고서 생성 시스템
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # 중앙 정렬된 로그인 폼
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        st.markdown("""
+        <div style='background: white; padding: 40px; border-radius: 16px; 
+        box-shadow: 0 10px 40px rgba(0,0,0,0.1); border: 2px solid #667eea;'>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("### 👤 사용자 정보 입력")
+        st.info("📊 테스트 로그 수집을 위해 정보를 입력해주세요")
+        
+        with st.form("user_login_form"):
+            user_name = st.text_input("이름 *", placeholder="홍길동", key="login_name")
+            user_email = st.text_input("이메일 (선택)", placeholder="hong@example.com", key="login_email")
+            
+            col_btn1, col_btn2 = st.columns([1, 1])
+            with col_btn1:
+                submitted = st.form_submit_button("🚀 시작하기", use_container_width=True, type="primary")
+            
+            if submitted:
+                if user_name:
+                    st.session_state.user_name = user_name
+                    st.session_state.user_email = user_email if user_email else None
+                    
+                    # 사용자 생성 또는 조회
+                    if supabase_client:
+                        user = create_or_get_test_user(user_name, user_email)
+                        if user:
+                            st.success(f"✅ {user_name}님 환영합니다!")
+                            log_activity("user_login", "success", {"name": user_name, "email": user_email})
+                            time.sleep(0.5)  # 성공 메시지 보여주기
+                            st.rerun()
+                    else:
+                        st.session_state.user_name = user_name
+                        st.session_state.user_email = user_email
+                        st.success(f"✅ {user_name}님 환영합니다!")
+                        time.sleep(0.5)
+                        st.rerun()
+                else:
+                    st.error("❌ 이름을 입력해주세요")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        # 하단 설명
+        st.markdown("---")
+        st.markdown("""
+        ### ✨ 주요 기능
+        - 📄 PDF 자동 분석 및 데이터 추출
+        - 🤖 AI 기반 보고서 자동 생성
+        - 💾 Supabase 데이터 저장 및 관리
+        - 📊 실시간 로그 수집 및 모니터링
+        """)
+    
+    st.stop()  # 로그인 전에는 아래 내용 표시 안 함
+
+# ============================================
+# 로그인 완료 후 - 사용자 정보 표시 (사이드바)
+# ============================================
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 👤 현재 사용자")
+st.sidebar.success(f"✅ {st.session_state.user_name}님")
+if st.session_state.user_email:
+    st.sidebar.caption(f"📧 {st.session_state.user_email}")
+
+if st.sidebar.button("🔄 다른 사용자로 변경", use_container_width=True):
+    st.session_state.user_name = None
+    st.session_state.user_email = None
+    st.session_state.session_id = str(uuid.uuid4())
+    st.session_state.current_test_session_id = None
+    st.rerun()
+
+# ============================================
+# 메인 앱
+# ============================================
+
 # 메인 영역
-tab1, tab2, tab3 = st.tabs(["📋 템플릿 목록", "🔍 데이터 추출", "📄 보고서 생성"])
+tab1, tab2, tab3, tab_admin = st.tabs(["📋 템플릿 목록", "🔍 데이터 추출", "📄 보고서 생성", "🔧 관리자"])
 
 with tab1:
     st.subheader("📋 현재 템플릿 목록")
@@ -1390,79 +1625,152 @@ with tab2:
     
     st.markdown("---")
     
-    if uploaded_file and st.button("🚀 데이터 추출 시작", type="primary"):
+    # 사용자 정보 확인
+    if not st.session_state.user_name:
+        st.warning("⚠️ 먼저 사이드바에서 사용자 정보를 입력하세요")
+    elif uploaded_file and st.button("🚀 데이터 추출 시작", type="primary"):
         if not st.session_state.template:
             st.error("❌ 템플릿을 먼저 설정하세요! 사이드바에서 키워드를 추가하세요.")
         else:
-            with st.spinner("📄 PDF 처리 중..."):
-                # 메인 PDF 텍스트 추출
-                pdf_text, num_pages = extract_text_from_pdf(uploaded_file, max_pages=50, use_ocr=use_ocr_mode)
-                st.session_state.pdf_text = pdf_text
+            # 테스트 세션 시작
+            session_start_time = time.time()
+            company_name_temp = "Unknown"
+            
+            try:
+                # 사용자 ID 가져오기
+                user = create_or_get_test_user(st.session_state.user_name, st.session_state.user_email)
+                user_id = user['id'] if user else None
                 
-                # 참고자료 PDF 처리
-                st.session_state.reference_pdfs = {}
-                if reference_files:
-                    with st.spinner(f"📚 참고자료 {len(reference_files)}개 처리 중..."):
-                        for ref_file in reference_files:
-                            ref_text, ref_pages = extract_text_from_pdf(ref_file, max_pages=50, use_ocr=use_ocr_mode)
-                            if ref_text:
-                                st.session_state.reference_pdfs[ref_file.name] = ref_text
-                                st.success(f"✅ {ref_file.name} 처리 완료 ({ref_pages}페이지, {len(ref_text)}자)")
+                # 세션 시작 로그
+                if user_id:
+                    start_test_session(user_id, "처리 중", uploaded_file.name)
                 
-                if pdf_text:
-                    st.success(f"✅ 메인 PDF {num_pages}페이지 처리 완료 (총 {len(pdf_text)}자 추출)")
+                # PDF 처리 시작
+                log_activity("pdf_upload", "started", {"filename": uploaded_file.name, "ocr_mode": use_ocr_mode})
+                
+                with st.spinner("📄 PDF 처리 중..."):
+                    pdf_start = time.time()
+                    # 메인 PDF 텍스트 추출
+                    pdf_text, num_pages = extract_text_from_pdf(uploaded_file, max_pages=50, use_ocr=use_ocr_mode)
+                    st.session_state.pdf_text = pdf_text
+                    pdf_time = int((time.time() - pdf_start) * 1000)
                     
-                    # 배치 방식으로 키워드 추출 (구조화된 데이터 활용)
-                    with st.spinner("🔍 데이터 추출 중..."):
-                        field_names = [field['name'] for field in st.session_state.template]
-                        # 구조화된 데이터가 있으면 전달
-                        structured_data = st.session_state.get('structured_data')
-                        if structured_data:
-                            st.info(f"📊 구조화된 데이터 활용: 표 {len(structured_data.get('tables', []))}개, 제목 {len(structured_data.get('headings', []))}개")
-                        extracted_data = extract_all_keywords_batch(pdf_text, field_names, structured_data=structured_data)
-                        st.session_state.extracted_data = extracted_data
+                    log_activity("pdf_upload", "success", {
+                        "filename": uploaded_file.name,
+                        "pages": num_pages,
+                        "text_length": len(pdf_text)
+                    }, pdf_time)
                     
-                    # Supabase에 저장
-                    if supabase_client:
-                        with st.spinner("💾 Supabase에 저장 중..."):
-                            company_name = extracted_data.get("회사명") or extracted_data.get("기업명") or "Unknown"
-                            company_id = save_to_supabase(
-                                company_name=company_name,
-                                pdf_file=uploaded_file,
-                                extracted_text=pdf_text,
-                                extracted_data=extracted_data
-                            )
-                            if company_id:
-                                st.success("✅ Supabase 저장 완료!")
+                    # 참고자료 PDF 처리
+                    st.session_state.reference_pdfs = {}
+                    if reference_files:
+                        with st.spinner(f"📚 참고자료 {len(reference_files)}개 처리 중..."):
+                            for ref_file in reference_files:
+                                ref_text, ref_pages = extract_text_from_pdf(ref_file, max_pages=50, use_ocr=use_ocr_mode)
+                                if ref_text:
+                                    st.session_state.reference_pdfs[ref_file.name] = ref_text
+                                    st.success(f"✅ {ref_file.name} 처리 완료 ({ref_pages}페이지, {len(ref_text)}자)")
                     
-                    # 결과 표시 - Gradio 스타일로
-                    st.markdown("---")
-                    st.markdown("## ✅ 처리 완료!")
-                    st.markdown("### 🤖 AI가 자동으로 추출한 정보")
-                    
-                    # 추출된 데이터를 카드 형식으로 표시
-                    for field in st.session_state.template:
-                        value = extracted_data.get(field['name'], "정보 없음")
-                        st.markdown(f"**📌 {field['name']}**")
+                    if pdf_text:
+                        st.success(f"✅ 메인 PDF {num_pages}페이지 처리 완료 (총 {len(pdf_text)}자 추출)")
+                        
+                        # 배치 방식으로 키워드 추출 (구조화된 데이터 활용)
+                        with st.spinner("🔍 데이터 추출 중..."):
+                            extract_start = time.time()
+                            field_names = [field['name'] for field in st.session_state.template]
+                            
+                            log_activity("keyword_extraction", "started", {"fields": field_names})
+                            
+                            # 구조화된 데이터가 있으면 전달
+                            structured_data = st.session_state.get('structured_data')
+                            if structured_data:
+                                st.info(f"📊 구조화된 데이터 활용: 표 {len(structured_data.get('tables', []))}개, 제목 {len(structured_data.get('headings', []))}개")
+                            
+                            extracted_data = extract_all_keywords_batch(pdf_text, field_names, structured_data=structured_data)
+                            st.session_state.extracted_data = extracted_data
+                            extract_time = int((time.time() - extract_start) * 1000)
+                            
+                            # 회사명 추출
+                            company_name_temp = extracted_data.get("회사명") or extracted_data.get("기업명") or "Unknown"
+                            
+                            log_activity("keyword_extraction", "success", {
+                                "fields_count": len(field_names),
+                                "extracted_count": len(extracted_data),
+                                "company_name": company_name_temp
+                            }, extract_time)
+                        
+                        # Supabase에 저장
+                        if supabase_client:
+                            with st.spinner("💾 Supabase에 저장 중..."):
+                                save_start = time.time()
+                                log_activity("data_save", "started")
+                                
+                                company_id = save_to_supabase(
+                                    company_name=company_name_temp,
+                                    pdf_file=uploaded_file,
+                                    extracted_text=pdf_text,
+                                    extracted_data=extracted_data
+                                )
+                                save_time = int((time.time() - save_start) * 1000)
+                                
+                                if company_id:
+                                    st.success("✅ Supabase 저장 완료!")
+                                    log_activity("data_save", "success", {"company_id": str(company_id)}, save_time)
+                                else:
+                                    log_activity("data_save", "failed", {"error": "company_id is None"}, save_time)
+                        
+                        # 세션 완료 로그
+                        total_time = int((time.time() - session_start_time) * 1000)
+                        complete_test_session("success", execution_time_ms=total_time)
+                        
+                        # 세션 업데이트 (회사명)
+                        if st.session_state.current_test_session_id:
+                            try:
+                                supabase_client.table("test_sessions").update({
+                                    "company_name": company_name_temp
+                                }).eq("id", st.session_state.current_test_session_id).execute()
+                            except:
+                                pass
+                        
+                        # 결과 표시 - Gradio 스타일로
+                        st.markdown("---")
+                        st.markdown("## ✅ 처리 완료!")
+                        st.markdown("### 🤖 AI가 자동으로 추출한 정보")
+                        
+                        # 추출된 데이터를 카드 형식으로 표시
+                        for field in st.session_state.template:
+                            value = extracted_data.get(field['name'], "정보 없음")
+                            st.markdown(f"**📌 {field['name']}**")
+                            st.markdown(f"""
+                            <div style='padding: 10px; background: white; border-radius: 8px; 
+                            margin-bottom: 15px; border: 1px solid #e2e8f0;'>
+                            {value}
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        # 원본 텍스트 표시
+                        st.markdown("---")
+                        st.markdown("### 📄 추출된 원본 텍스트 (전체)")
                         st.markdown(f"""
-                        <div style='padding: 10px; background: white; border-radius: 8px; 
-                        margin-bottom: 15px; border: 1px solid #e2e8f0;'>
-                        {value}
+                        <div style='background: #f8fafc; padding: 15px; border-radius: 8px; 
+                        font-family: monospace; font-size: 13px; line-height: 1.6; 
+                        max-height: 600px; overflow-y: auto;'>
+                        {pdf_text}
                         </div>
                         """, unsafe_allow_html=True)
-                    
-                    # 원본 텍스트 표시
-                    st.markdown("---")
-                    st.markdown("### 📄 추출된 원본 텍스트 (전체)")
-                    st.markdown(f"""
-                    <div style='background: #f8fafc; padding: 15px; border-radius: 8px; 
-                    font-family: monospace; font-size: 13px; line-height: 1.6; 
-                    max-height: 600px; overflow-y: auto;'>
-                    {pdf_text}
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.error("❌ PDF에서 텍스트를 추출할 수 없습니다.")
+                    else:
+                        st.error("❌ PDF에서 텍스트를 추출할 수 없습니다.")
+                        log_error("pdf_upload", Exception("PDF 텍스트 추출 실패"))
+                        complete_test_session("failed", "PDF 텍스트 추출 실패")
+            
+            except Exception as e:
+                st.error(f"❌ 처리 중 오류 발생: {str(e)}")
+                error_trace = traceback.format_exc()
+                with st.expander("🔍 상세 에러 정보"):
+                    st.code(error_trace)
+                
+                log_error("data_extraction", e, error_trace)
+                complete_test_session("failed", str(e))
     
     # 이미 추출된 데이터가 있으면 표시 (새로 추출하거나 이전 분석 불러온 경우)
     elif st.session_state.extracted_data:
@@ -1594,6 +1902,11 @@ with tab3:
         
         with col1:
             if st.button("📋 보고서 미리보기", type="secondary"):
+                report_start = time.time()
+                log_activity("report_generation", "started", {
+                    "sections_count": len(st.session_state.get('report_sections', []))
+                })
+                
                 with st.spinner("✨ OpenAI로 보고서 생성 중..."):
                     try:
                         # 구조화된 데이터 전달
@@ -1620,10 +1933,21 @@ with tab3:
                         
                         # 보고서를 세션에 저장
                         st.session_state.report = report
+                        
+                        report_time = int((time.time() - report_start) * 1000)
+                        log_activity("report_generation", "success", {
+                            "report_length": len(report),
+                            "sections": st.session_state.get('report_sections', [])
+                        }, report_time)
+                        
                         st.rerun()
                         
                     except Exception as e:
                         st.error(f"❌ 보고서 생성 실패: {str(e)}")
+                        error_trace = traceback.format_exc()
+                        log_error("report_generation", e, error_trace)
+                        with st.expander("🔍 상세 에러 정보"):
+                            st.code(error_trace)
         
         with col2:
             if st.button("📄 보고서 생성 (DOCX)", type="primary"):
@@ -1771,4 +2095,215 @@ with tab3:
             st.markdown("### 📄 생성된 보고서")
             st.markdown(st.session_state.report)
 
-
+# ============================================
+# 관리자 페이지
+# ============================================
+with tab_admin:
+    st.subheader("🔧 관리자 페이지")
+    
+    # 비밀번호 확인
+    if 'admin_logged_in' not in st.session_state:
+        st.session_state.admin_logged_in = False
+    
+    if not st.session_state.admin_logged_in:
+        st.info("🔒 관리자 페이지는 비밀번호가 필요합니다")
+        admin_password = st.text_input("비밀번호", type="password", key="admin_password")
+        
+        if st.button("로그인"):
+            # 환경변수에서 비밀번호 가져오기 (기본값: admin123)
+            correct_password = os.getenv("ADMIN_PASSWORD", "admin123")
+            if admin_password == correct_password:
+                st.session_state.admin_logged_in = True
+                st.rerun()
+            else:
+                st.error("❌ 비밀번호가 틀렸습니다")
+    else:
+        st.success("✅ 관리자 로그인됨")
+        
+        if st.button("🚪 로그아웃"):
+            st.session_state.admin_logged_in = False
+            st.rerun()
+        
+        st.markdown("---")
+        
+        if not supabase_client:
+            st.warning("⚠️ Supabase가 연결되지 않아 로그를 조회할 수 없습니다")
+        else:
+            # 탭 구성
+            admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📊 통계", "👥 사용자 목록", "📋 로그 조회"])
+            
+            with admin_tab1:
+                st.markdown("### 📊 테스트 통계")
+                
+                try:
+                    # 전체 세션 수
+                    sessions = supabase_client.table("test_sessions").select("*").execute()
+                    total_sessions = len(sessions.data) if sessions.data else 0
+                    
+                    # 성공/실패 세션
+                    success_sessions = len([s for s in sessions.data if s.get('status') == 'success']) if sessions.data else 0
+                    failed_sessions = len([s for s in sessions.data if s.get('status') == 'failed']) if sessions.data else 0
+                    in_progress = len([s for s in sessions.data if s.get('status') == 'in_progress']) if sessions.data else 0
+                    
+                    # 사용자 수
+                    users = supabase_client.table("test_users").select("*").execute()
+                    total_users = len(users.data) if users.data else 0
+                    
+                    # 메트릭 표시
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("👥 총 사용자", total_users)
+                    col2.metric("📝 총 세션", total_sessions)
+                    col3.metric("✅ 성공", success_sessions)
+                    col4.metric("❌ 실패", failed_sessions)
+                    
+                    if in_progress > 0:
+                        st.info(f"⏳ 진행 중인 세션: {in_progress}개")
+                    
+                    # 성공률
+                    if total_sessions > 0:
+                        success_rate = (success_sessions / total_sessions) * 100
+                        st.progress(success_rate / 100)
+                        st.caption(f"성공률: {success_rate:.1f}%")
+                    
+                except Exception as e:
+                    st.error(f"통계 조회 실패: {e}")
+            
+            with admin_tab2:
+                st.markdown("### 👥 사용자 목록")
+                
+                try:
+                    users = supabase_client.table("test_users").select("*").order("created_at", desc=True).execute()
+                    
+                    if users.data:
+                        for user in users.data:
+                            with st.expander(f"👤 {user.get('name', 'Unknown')} ({user.get('email', 'N/A')})"):
+                                st.write(f"**세션 ID**: `{user.get('session_id', 'N/A')}`")
+                                st.write(f"**가입일**: {user.get('created_at', 'N/A')}")
+                                
+                                # 해당 사용자의 세션 조회
+                                user_sessions = supabase_client.table("test_sessions").select("*").eq("user_id", user['id']).order("started_at", desc=True).execute()
+                                
+                                if user_sessions.data:
+                                    st.write(f"**총 세션 수**: {len(user_sessions.data)}")
+                                    for session in user_sessions.data[:5]:  # 최근 5개만
+                                        status_emoji = "✅" if session.get('status') == 'success' else "❌" if session.get('status') == 'failed' else "⏳"
+                                        st.write(f"{status_emoji} {session.get('company_name', 'N/A')} - {session.get('started_at', 'N/A')}")
+                    else:
+                        st.info("등록된 사용자가 없습니다")
+                
+                except Exception as e:
+                    st.error(f"사용자 목록 조회 실패: {e}")
+            
+            with admin_tab3:
+                st.markdown("### 📋 로그 조회 및 다운로드")
+                
+                # 필터
+                col1, col2 = st.columns(2)
+                with col1:
+                    log_type = st.selectbox("로그 유형", ["전체", "세션 로그", "활동 로그", "에러만"])
+                with col2:
+                    limit = st.number_input("표시 개수", 10, 500, 100)
+                
+                if st.button("🔍 로그 조회", type="primary"):
+                    try:
+                        if log_type == "세션 로그" or log_type == "전체":
+                            st.markdown("#### 📝 세션 로그")
+                            sessions = supabase_client.table("test_sessions").select("*").order("started_at", desc=True).limit(limit).execute()
+                            
+                            if sessions.data:
+                                for session in sessions.data:
+                                    status_color = "green" if session.get('status') == 'success' else "red" if session.get('status') == 'failed' else "orange"
+                                    st.markdown(f"**:{status_color}[{session.get('status', 'unknown').upper()}]** {session.get('company_name', 'N/A')} - {session.get('pdf_filename', 'N/A')}")
+                                    st.caption(f"시작: {session.get('started_at', 'N/A')} | 완료: {session.get('completed_at', 'N/A')}")
+                                    if session.get('error_message'):
+                                        with st.expander("❌ 에러 메시지"):
+                                            st.code(session.get('error_message'))
+                                    st.markdown("---")
+                                
+                                # CSV 다운로드
+                                import pandas as pd
+                                df = pd.DataFrame(sessions.data)
+                                csv = df.to_csv(index=False, encoding='utf-8-sig')
+                                st.download_button(
+                                    "📥 세션 로그 CSV 다운로드",
+                                    csv,
+                                    f"session_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                    "text/csv"
+                                )
+                        
+                        if log_type == "활동 로그" or log_type == "전체":
+                            st.markdown("#### 🔍 활동 로그")
+                            
+                            query = supabase_client.table("activity_logs").select("*").order("created_at", desc=True).limit(limit)
+                            if log_type == "에러만":
+                                query = query.eq("status", "failed")
+                            
+                            logs = query.execute()
+                            
+                            if logs.data:
+                                for log in logs.data:
+                                    status_emoji = "✅" if log.get('status') == 'success' else "❌" if log.get('status') == 'failed' else "⏳"
+                                    st.markdown(f"{status_emoji} **{log.get('step', 'unknown')}** - {log.get('status', 'unknown')}")
+                                    st.caption(f"시간: {log.get('created_at', 'N/A')} | 실행시간: {log.get('execution_time_ms', 0)}ms")
+                                    
+                                    if log.get('details'):
+                                        with st.expander("📄 상세 정보"):
+                                            st.json(log.get('details'))
+                                    st.markdown("---")
+                                
+                                # CSV 다운로드
+                                import pandas as pd
+                                df = pd.DataFrame(logs.data)
+                                csv = df.to_csv(index=False, encoding='utf-8-sig')
+                                st.download_button(
+                                    "📥 활동 로그 CSV 다운로드",
+                                    csv,
+                                    f"activity_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                    "text/csv"
+                                )
+                            else:
+                                st.info("조회된 로그가 없습니다")
+                    
+                    except Exception as e:
+                        st.error(f"로그 조회 실패: {e}")
+                        st.code(traceback.format_exc())
+                
+                st.markdown("---")
+                st.markdown("### 📦 전체 로그 다운로드")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("📥 세션 로그 전체 다운로드"):
+                        try:
+                            sessions = supabase_client.table("test_sessions").select("*").order("started_at", desc=True).execute()
+                            if sessions.data:
+                                import pandas as pd
+                                df = pd.DataFrame(sessions.data)
+                                csv = df.to_csv(index=False, encoding='utf-8-sig')
+                                st.download_button(
+                                    "다운로드",
+                                    csv,
+                                    f"all_sessions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                    "text/csv",
+                                    key="download_all_sessions"
+                                )
+                        except Exception as e:
+                            st.error(f"다운로드 실패: {e}")
+                
+                with col2:
+                    if st.button("📥 활동 로그 전체 다운로드"):
+                        try:
+                            logs = supabase_client.table("activity_logs").select("*").order("created_at", desc=True).limit(5000).execute()
+                            if logs.data:
+                                import pandas as pd
+                                df = pd.DataFrame(logs.data)
+                                csv = df.to_csv(index=False, encoding='utf-8-sig')
+                                st.download_button(
+                                    "다운로드",
+                                    csv,
+                                    f"all_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                    "text/csv",
+                                    key="download_all_logs"
+                                )
+                        except Exception as e:
+                            st.error(f"다운로드 실패: {e}")
