@@ -1543,8 +1543,14 @@ if st.sidebar.button("🔄 다른 사용자로 변경", use_container_width=True
 # 메인 앱
 # ============================================
 
-# 메인 영역
-tab1, tab2, tab3, tab_admin = st.tabs(["📋 템플릿 목록", "🔍 데이터 추출", "📄 보고서 생성", "🔧 관리자"])
+# 메인 영역 - 관리자 탭은 특정 사용자에게만 표시
+is_admin = (st.session_state.user_name == "신봉규" and 
+            st.session_state.user_email == "shinbonggyu@daum.net")
+
+if is_admin:
+    tab1, tab2, tab3, tab_admin = st.tabs(["📋 템플릿 목록", "🔍 데이터 추출", "📄 보고서 생성", "🔧 관리자"])
+else:
+    tab1, tab2, tab3 = st.tabs(["📋 템플릿 목록", "🔍 데이터 추출", "📄 보고서 생성"])
 
 with tab1:
     st.subheader("📋 현재 템플릿 목록")
@@ -2098,212 +2104,213 @@ with tab3:
 # ============================================
 # 관리자 페이지
 # ============================================
-with tab_admin:
-    st.subheader("🔧 관리자 페이지")
-    
-    # 비밀번호 확인
-    if 'admin_logged_in' not in st.session_state:
-        st.session_state.admin_logged_in = False
-    
-    if not st.session_state.admin_logged_in:
-        st.info("🔒 관리자 페이지는 비밀번호가 필요합니다")
-        admin_password = st.text_input("비밀번호", type="password", key="admin_password")
+if is_admin:
+    with tab_admin:
+        st.subheader("🔧 관리자 페이지")
         
-        if st.button("로그인"):
-            # 환경변수에서 비밀번호 가져오기 (기본값: admin123)
-            correct_password = os.getenv("ADMIN_PASSWORD", "admin123")
-            if admin_password == correct_password:
-                st.session_state.admin_logged_in = True
-                st.rerun()
-            else:
-                st.error("❌ 비밀번호가 틀렸습니다")
-    else:
-        st.success("✅ 관리자 로그인됨")
-        
-        if st.button("🚪 로그아웃"):
+        # 비밀번호 확인
+        if 'admin_logged_in' not in st.session_state:
             st.session_state.admin_logged_in = False
-            st.rerun()
         
-        st.markdown("---")
-        
-        if not supabase_client:
-            st.warning("⚠️ Supabase가 연결되지 않아 로그를 조회할 수 없습니다")
+        if not st.session_state.admin_logged_in:
+            st.info("🔒 관리자 페이지는 비밀번호가 필요합니다")
+            admin_password = st.text_input("비밀번호", type="password", key="admin_password")
+            
+            if st.button("로그인"):
+                # 환경변수에서 비밀번호 가져오기 (기본값: admin123)
+                correct_password = os.getenv("ADMIN_PASSWORD", "admin123")
+                if admin_password == correct_password:
+                    st.session_state.admin_logged_in = True
+                    st.rerun()
+                else:
+                    st.error("❌ 비밀번호가 틀렸습니다")
         else:
-            # 탭 구성
-            admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📊 통계", "👥 사용자 목록", "📋 로그 조회"])
+            st.success("✅ 관리자 로그인됨")
             
-            with admin_tab1:
-                st.markdown("### 📊 테스트 통계")
-                
-                try:
-                    # 전체 세션 수
-                    sessions = supabase_client.table("test_sessions").select("*").execute()
-                    total_sessions = len(sessions.data) if sessions.data else 0
-                    
-                    # 성공/실패 세션
-                    success_sessions = len([s for s in sessions.data if s.get('status') == 'success']) if sessions.data else 0
-                    failed_sessions = len([s for s in sessions.data if s.get('status') == 'failed']) if sessions.data else 0
-                    in_progress = len([s for s in sessions.data if s.get('status') == 'in_progress']) if sessions.data else 0
-                    
-                    # 사용자 수
-                    users = supabase_client.table("test_users").select("*").execute()
-                    total_users = len(users.data) if users.data else 0
-                    
-                    # 메트릭 표시
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("👥 총 사용자", total_users)
-                    col2.metric("📝 총 세션", total_sessions)
-                    col3.metric("✅ 성공", success_sessions)
-                    col4.metric("❌ 실패", failed_sessions)
-                    
-                    if in_progress > 0:
-                        st.info(f"⏳ 진행 중인 세션: {in_progress}개")
-                    
-                    # 성공률
-                    if total_sessions > 0:
-                        success_rate = (success_sessions / total_sessions) * 100
-                        st.progress(success_rate / 100)
-                        st.caption(f"성공률: {success_rate:.1f}%")
-                    
-                except Exception as e:
-                    st.error(f"통계 조회 실패: {e}")
+            if st.button("🚪 로그아웃"):
+                st.session_state.admin_logged_in = False
+                st.rerun()
             
-            with admin_tab2:
-                st.markdown("### 👥 사용자 목록")
-                
-                try:
-                    users = supabase_client.table("test_users").select("*").order("created_at", desc=True).execute()
-                    
-                    if users.data:
-                        for user in users.data:
-                            with st.expander(f"👤 {user.get('name', 'Unknown')} ({user.get('email', 'N/A')})"):
-                                st.write(f"**세션 ID**: `{user.get('session_id', 'N/A')}`")
-                                st.write(f"**가입일**: {user.get('created_at', 'N/A')}")
-                                
-                                # 해당 사용자의 세션 조회
-                                user_sessions = supabase_client.table("test_sessions").select("*").eq("user_id", user['id']).order("started_at", desc=True).execute()
-                                
-                                if user_sessions.data:
-                                    st.write(f"**총 세션 수**: {len(user_sessions.data)}")
-                                    for session in user_sessions.data[:5]:  # 최근 5개만
-                                        status_emoji = "✅" if session.get('status') == 'success' else "❌" if session.get('status') == 'failed' else "⏳"
-                                        st.write(f"{status_emoji} {session.get('company_name', 'N/A')} - {session.get('started_at', 'N/A')}")
-                    else:
-                        st.info("등록된 사용자가 없습니다")
-                
-                except Exception as e:
-                    st.error(f"사용자 목록 조회 실패: {e}")
+            st.markdown("---")
             
-            with admin_tab3:
-                st.markdown("### 📋 로그 조회 및 다운로드")
+            if not supabase_client:
+                st.warning("⚠️ Supabase가 연결되지 않아 로그를 조회할 수 없습니다")
+            else:
+                # 탭 구성
+                admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📊 통계", "👥 사용자 목록", "📋 로그 조회"])
                 
-                # 필터
-                col1, col2 = st.columns(2)
-                with col1:
-                    log_type = st.selectbox("로그 유형", ["전체", "세션 로그", "활동 로그", "에러만"])
-                with col2:
-                    limit = st.number_input("표시 개수", 10, 500, 100)
-                
-                if st.button("🔍 로그 조회", type="primary"):
+                with admin_tab1:
+                    st.markdown("### 📊 테스트 통계")
+                    
                     try:
-                        if log_type == "세션 로그" or log_type == "전체":
-                            st.markdown("#### 📝 세션 로그")
-                            sessions = supabase_client.table("test_sessions").select("*").order("started_at", desc=True).limit(limit).execute()
-                            
-                            if sessions.data:
-                                for session in sessions.data:
-                                    status_color = "green" if session.get('status') == 'success' else "red" if session.get('status') == 'failed' else "orange"
-                                    st.markdown(f"**:{status_color}[{session.get('status', 'unknown').upper()}]** {session.get('company_name', 'N/A')} - {session.get('pdf_filename', 'N/A')}")
-                                    st.caption(f"시작: {session.get('started_at', 'N/A')} | 완료: {session.get('completed_at', 'N/A')}")
-                                    if session.get('error_message'):
-                                        with st.expander("❌ 에러 메시지"):
-                                            st.code(session.get('error_message'))
-                                    st.markdown("---")
-                                
-                                # CSV 다운로드
-                                import pandas as pd
-                                df = pd.DataFrame(sessions.data)
-                                csv = df.to_csv(index=False, encoding='utf-8-sig')
-                                st.download_button(
-                                    "📥 세션 로그 CSV 다운로드",
-                                    csv,
-                                    f"session_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                    "text/csv"
-                                )
+                        # 전체 세션 수
+                        sessions = supabase_client.table("test_sessions").select("*").execute()
+                        total_sessions = len(sessions.data) if sessions.data else 0
                         
-                        if log_type == "활동 로그" or log_type == "전체":
-                            st.markdown("#### 🔍 활동 로그")
-                            
-                            query = supabase_client.table("activity_logs").select("*").order("created_at", desc=True).limit(limit)
-                            if log_type == "에러만":
-                                query = query.eq("status", "failed")
-                            
-                            logs = query.execute()
-                            
-                            if logs.data:
-                                for log in logs.data:
-                                    status_emoji = "✅" if log.get('status') == 'success' else "❌" if log.get('status') == 'failed' else "⏳"
-                                    st.markdown(f"{status_emoji} **{log.get('step', 'unknown')}** - {log.get('status', 'unknown')}")
-                                    st.caption(f"시간: {log.get('created_at', 'N/A')} | 실행시간: {log.get('execution_time_ms', 0)}ms")
+                        # 성공/실패 세션
+                        success_sessions = len([s for s in sessions.data if s.get('status') == 'success']) if sessions.data else 0
+                        failed_sessions = len([s for s in sessions.data if s.get('status') == 'failed']) if sessions.data else 0
+                        in_progress = len([s for s in sessions.data if s.get('status') == 'in_progress']) if sessions.data else 0
+                        
+                        # 사용자 수
+                        users = supabase_client.table("test_users").select("*").execute()
+                        total_users = len(users.data) if users.data else 0
+                        
+                        # 메트릭 표시
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("👥 총 사용자", total_users)
+                        col2.metric("📝 총 세션", total_sessions)
+                        col3.metric("✅ 성공", success_sessions)
+                        col4.metric("❌ 실패", failed_sessions)
+                        
+                        if in_progress > 0:
+                            st.info(f"⏳ 진행 중인 세션: {in_progress}개")
+                        
+                        # 성공률
+                        if total_sessions > 0:
+                            success_rate = (success_sessions / total_sessions) * 100
+                            st.progress(success_rate / 100)
+                            st.caption(f"성공률: {success_rate:.1f}%")
+                        
+                    except Exception as e:
+                        st.error(f"통계 조회 실패: {e}")
+                
+                with admin_tab2:
+                    st.markdown("### 👥 사용자 목록")
+                    
+                    try:
+                        users = supabase_client.table("test_users").select("*").order("created_at", desc=True).execute()
+                        
+                        if users.data:
+                            for user in users.data:
+                                with st.expander(f"👤 {user.get('name', 'Unknown')} ({user.get('email', 'N/A')})"):
+                                    st.write(f"**세션 ID**: `{user.get('session_id', 'N/A')}`")
+                                    st.write(f"**가입일**: {user.get('created_at', 'N/A')}")
                                     
-                                    if log.get('details'):
-                                        with st.expander("📄 상세 정보"):
-                                            st.json(log.get('details'))
-                                    st.markdown("---")
-                                
-                                # CSV 다운로드
-                                import pandas as pd
-                                df = pd.DataFrame(logs.data)
-                                csv = df.to_csv(index=False, encoding='utf-8-sig')
-                                st.download_button(
-                                    "📥 활동 로그 CSV 다운로드",
-                                    csv,
-                                    f"activity_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                    "text/csv"
-                                )
-                            else:
-                                st.info("조회된 로그가 없습니다")
+                                    # 해당 사용자의 세션 조회
+                                    user_sessions = supabase_client.table("test_sessions").select("*").eq("user_id", user['id']).order("started_at", desc=True).execute()
+                                    
+                                    if user_sessions.data:
+                                        st.write(f"**총 세션 수**: {len(user_sessions.data)}")
+                                        for session in user_sessions.data[:5]:  # 최근 5개만
+                                            status_emoji = "✅" if session.get('status') == 'success' else "❌" if session.get('status') == 'failed' else "⏳"
+                                            st.write(f"{status_emoji} {session.get('company_name', 'N/A')} - {session.get('started_at', 'N/A')}")
+                        else:
+                            st.info("등록된 사용자가 없습니다")
                     
                     except Exception as e:
-                        st.error(f"로그 조회 실패: {e}")
-                        st.code(traceback.format_exc())
+                        st.error(f"사용자 목록 조회 실패: {e}")
                 
-                st.markdown("---")
-                st.markdown("### 📦 전체 로그 다운로드")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("📥 세션 로그 전체 다운로드"):
+                with admin_tab3:
+                    st.markdown("### 📋 로그 조회 및 다운로드")
+                    
+                    # 필터
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        log_type = st.selectbox("로그 유형", ["전체", "세션 로그", "활동 로그", "에러만"])
+                    with col2:
+                        limit = st.number_input("표시 개수", 10, 500, 100)
+                    
+                    if st.button("🔍 로그 조회", type="primary"):
                         try:
-                            sessions = supabase_client.table("test_sessions").select("*").order("started_at", desc=True).execute()
-                            if sessions.data:
-                                import pandas as pd
-                                df = pd.DataFrame(sessions.data)
-                                csv = df.to_csv(index=False, encoding='utf-8-sig')
-                                st.download_button(
-                                    "다운로드",
-                                    csv,
-                                    f"all_sessions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                    "text/csv",
-                                    key="download_all_sessions"
-                                )
+                            if log_type == "세션 로그" or log_type == "전체":
+                                st.markdown("#### 📝 세션 로그")
+                                sessions = supabase_client.table("test_sessions").select("*").order("started_at", desc=True).limit(limit).execute()
+                                
+                                if sessions.data:
+                                    for session in sessions.data:
+                                        status_color = "green" if session.get('status') == 'success' else "red" if session.get('status') == 'failed' else "orange"
+                                        st.markdown(f"**:{status_color}[{session.get('status', 'unknown').upper()}]** {session.get('company_name', 'N/A')} - {session.get('pdf_filename', 'N/A')}")
+                                        st.caption(f"시작: {session.get('started_at', 'N/A')} | 완료: {session.get('completed_at', 'N/A')}")
+                                        if session.get('error_message'):
+                                            with st.expander("❌ 에러 메시지"):
+                                                st.code(session.get('error_message'))
+                                        st.markdown("---")
+                                    
+                                    # CSV 다운로드
+                                    import pandas as pd
+                                    df = pd.DataFrame(sessions.data)
+                                    csv = df.to_csv(index=False, encoding='utf-8-sig')
+                                    st.download_button(
+                                        "📥 세션 로그 CSV 다운로드",
+                                        csv,
+                                        f"session_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                        "text/csv"
+                                    )
+                            
+                            if log_type == "활동 로그" or log_type == "전체":
+                                st.markdown("#### 🔍 활동 로그")
+                                
+                                query = supabase_client.table("activity_logs").select("*").order("created_at", desc=True).limit(limit)
+                                if log_type == "에러만":
+                                    query = query.eq("status", "failed")
+                                
+                                logs = query.execute()
+                                
+                                if logs.data:
+                                    for log in logs.data:
+                                        status_emoji = "✅" if log.get('status') == 'success' else "❌" if log.get('status') == 'failed' else "⏳"
+                                        st.markdown(f"{status_emoji} **{log.get('step', 'unknown')}** - {log.get('status', 'unknown')}")
+                                        st.caption(f"시간: {log.get('created_at', 'N/A')} | 실행시간: {log.get('execution_time_ms', 0)}ms")
+                                        
+                                        if log.get('details'):
+                                            with st.expander("📄 상세 정보"):
+                                                st.json(log.get('details'))
+                                        st.markdown("---")
+                                    
+                                    # CSV 다운로드
+                                    import pandas as pd
+                                    df = pd.DataFrame(logs.data)
+                                    csv = df.to_csv(index=False, encoding='utf-8-sig')
+                                    st.download_button(
+                                        "📥 활동 로그 CSV 다운로드",
+                                        csv,
+                                        f"activity_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                        "text/csv"
+                                    )
+                                else:
+                                    st.info("조회된 로그가 없습니다")
+                        
                         except Exception as e:
-                            st.error(f"다운로드 실패: {e}")
-                
-                with col2:
-                    if st.button("📥 활동 로그 전체 다운로드"):
-                        try:
-                            logs = supabase_client.table("activity_logs").select("*").order("created_at", desc=True).limit(5000).execute()
-                            if logs.data:
-                                import pandas as pd
-                                df = pd.DataFrame(logs.data)
-                                csv = df.to_csv(index=False, encoding='utf-8-sig')
-                                st.download_button(
-                                    "다운로드",
-                                    csv,
-                                    f"all_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                    "text/csv",
-                                    key="download_all_logs"
-                                )
-                        except Exception as e:
-                            st.error(f"다운로드 실패: {e}")
+                            st.error(f"로그 조회 실패: {e}")
+                            st.code(traceback.format_exc())
+                    
+                    st.markdown("---")
+                    st.markdown("### 📦 전체 로그 다운로드")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("📥 세션 로그 전체 다운로드"):
+                            try:
+                                sessions = supabase_client.table("test_sessions").select("*").order("started_at", desc=True).execute()
+                                if sessions.data:
+                                    import pandas as pd
+                                    df = pd.DataFrame(sessions.data)
+                                    csv = df.to_csv(index=False, encoding='utf-8-sig')
+                                    st.download_button(
+                                        "다운로드",
+                                        csv,
+                                        f"all_sessions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                        "text/csv",
+                                        key="download_all_sessions"
+                                    )
+                            except Exception as e:
+                                st.error(f"다운로드 실패: {e}")
+                    
+                    with col2:
+                        if st.button("📥 활동 로그 전체 다운로드"):
+                            try:
+                                logs = supabase_client.table("activity_logs").select("*").order("created_at", desc=True).limit(5000).execute()
+                                if logs.data:
+                                    import pandas as pd
+                                    df = pd.DataFrame(logs.data)
+                                    csv = df.to_csv(index=False, encoding='utf-8-sig')
+                                    st.download_button(
+                                        "다운로드",
+                                        csv,
+                                        f"all_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                        "text/csv",
+                                        key="download_all_logs"
+                                    )
+                            except Exception as e:
+                                st.error(f"다운로드 실패: {e}")
