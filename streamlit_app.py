@@ -267,7 +267,26 @@ def complete_test_session(status, error_message=None, execution_time_ms=None):
 
 def log_activity(step, status, details=None, execution_time_ms=None):
     """활동 로그 기록"""
-    if not supabase_client or not st.session_state.current_test_session_id:
+    if not supabase_client:
+        return
+    
+    # user_login은 세션 ID 없이도 기록 (일반 텍스트 session_id 사용)
+    if step == "user_login":
+        try:
+            log_data = {
+                "session_id": st.session_state.session_id,  # UUID가 아닌 일반 텍스트 세션 ID
+                "step": step,
+                "status": status,
+                "details": details if details else {},
+                "execution_time_ms": execution_time_ms
+            }
+            supabase_client.table("activity_logs").insert(log_data).execute()
+        except Exception as e:
+            print(f"로그 기록 실패: {e}")
+        return
+    
+    # 그 외 로그는 test_session_id 필요
+    if not st.session_state.current_test_session_id:
         return
     
     try:
@@ -284,7 +303,7 @@ def log_activity(step, status, details=None, execution_time_ms=None):
 
 def log_error(step, error, stack_trace=None):
     """에러 로그 기록"""
-    if not supabase_client or not st.session_state.current_test_session_id:
+    if not supabase_client:
         return
     
     try:
@@ -294,8 +313,11 @@ def log_error(step, error, stack_trace=None):
             "stack_trace": stack_trace or traceback.format_exc()
         }
         
+        # test_session_id가 있으면 UUID 사용, 없으면 일반 session_id 사용
+        session_id_to_use = st.session_state.current_test_session_id if st.session_state.current_test_session_id else st.session_state.session_id
+        
         log_data = {
-            "session_id": st.session_state.current_test_session_id,
+            "session_id": session_id_to_use,
             "step": step,
             "status": "failed",
             "details": error_details
