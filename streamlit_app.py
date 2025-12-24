@@ -1132,18 +1132,10 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
             "document": (getattr(pdf_file, 'name', 'document.pdf'), pdf_bytes, "application/pdf")
         }
         
-        # OCR 강제 사용 + 모든 요소 타입 추출 + 고급 옵션
+        # Upstage Document Parse API 파라미터 (검증된 옵션만 사용)
         data = {
             "ocr": "force",  # Always apply OCR
-            "model": "document-parse-en",  # 또는 enhanced 모델
-            "output_formats": "text,html,markdown",  # 모든 포맷 요청
-            "coordinates": "true",  # 좌표 정보 (bounding boxes)
-            "merge_multipage_tables": "true",  # ⭐ 여러 페이지 표 병합
-            # 모든 문서 요소 타입 명시적으로 요청
-            "base64_encoding": [
-                "figure", "table", "chart", "header", "paragraph", 
-                "list", "equation", "caption", "index", "footnote"
-            ]
+            "output_formats": ["text", "html", "markdown"],  # 여러 포맷 요청
         }
         
         response = requests.post(
