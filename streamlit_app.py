@@ -1203,6 +1203,19 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
         
         st.success(f"✅ Upstage 분석 완료: {num_pages}페이지, {len(text)}자, 표 {table_count}개 인식")
         
+        # 디버그: 표 인식 실패 시 경고
+        if table_count == 0 and num_pages > 0:
+            st.warning("⚠️ Upstage가 표를 인식하지 못했습니다. PDF가 이미지 기반이거나 표가 복잡한 구조일 수 있습니다.")
+            st.info("💡 LLM이 텍스트에서 직접 재무 데이터를 추출하도록 프롬프트가 개선되었습니다.")
+            
+            # 디버그 정보
+            with st.expander("🔍 디버그: Upstage 응답 구조"):
+                st.write(f"- 총 요소 수: {sum(len(structured_elements[k]) for k in structured_elements)}")
+                st.write(f"- 제목: {len(structured_elements['headings'])}개")
+                st.write(f"- 단락: {len(structured_elements['paragraphs'])}개")
+                st.write(f"- 리스트: {len(structured_elements['lists'])}개")
+                st.write(f"- 표: {len(structured_elements['tables'])}개")
+        
         # 세션에 구조화된 데이터 저장
         st.session_state.structured_data = structured_elements
         
@@ -1291,8 +1304,11 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
                     heading_summary += f"- {heading['content']}\n"
                 context_info += heading_summary
         
-        # 텍스트가 너무 길면 앞부분만 사용
-        text_preview = text[:3000] if not context_info else text[:2000]
+        # 텍스트 길이 조정 - 표가 없으면 더 많은 텍스트 제공
+        if structured_data and structured_data.get("tables"):
+            text_preview = text[:2000]  # 표가 있으면 짧게
+        else:
+            text_preview = text[:5000]  # 표가 없으면 길게 (텍스트에서 직접 찾아야 함)
         
         # 모든 필드를 한 번에 요청
         fields_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(field_names)])
@@ -1309,14 +1325,32 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
 {fields_list}
 
 **중요 지침:**
-1. **표 데이터가 있으면 무조건 표에서 먼저 찾으세요**
-   - "매출액" 요청 시 → 표의 "매출액" 행에서 최신 연도/분기 데이터 추출
-   - "영업이익" 요청 시 → 표의 "영업이익" 행에서 최신 데이터 추출
-   - "영업이익률" 요청 시 → 표의 "(%)" 또는 "영업이익률" 행에서 데이터 추출
-2. 여러 기간 데이터가 있으면: "2024년 2,345억 원, 2025년 1,018억 원" 형식으로 모두 표시
-3. 표에 없는 항목만 본문에서 찾으세요
-4. 정보가 전혀 없으면 "정보 없음"만 응답
-5. 수치는 원문 그대로 (예: 2,345억 원, 10%, 551억 원)
+1. **표 형식 데이터 우선 탐색**
+   - 구조화된 표가 있으면 무조건 표에서 먼저 찾기
+   - 표 형식 텍스트(| 구분자, --- 등)도 표로 인식하고 파싱
+   - "매출액" → 표의 "매출액" 또는 "매출" 행에서 추출
+   - "영업이익" → 표의 "영업이익" 행에서 추출
+   - "영업이익률" → 표의 "영업이익률" 또는 "%" 단위 데이터 추출
+
+2. **재무 데이터 추출 방법**
+   - 마크다운 표 형식: "| 구분 | 24.3Q | 25.2Q |" → 숫자 값 추출
+   - 텍스트 형식: "영업이익 561억 원" → 직접 추출
+   - 여러 기간이 있으면 모두 표시: "24년 3분기 561억 원, 25년 2분기 390억 원"
+
+3. **키워드별 주의사항**
+   - "영업이익" ≠ "영업이익률" (금액 vs 비율, 단위 확인!)
+   - "매출액" = "매출" (동일 의미)
+   - 수치는 원문 단위 그대로 (억 원, %, 조 원 등)
+
+4. **추출 전략**
+   - 1단계: 표 형식 텍스트에서 찾기
+   - 2단계: 일반 텍스트에서 "키워드 + 숫자" 패턴 찾기
+   - 3단계: 문맥상 관련 섹션에서 추출
+   - 정말 없으면 "정보 없음"
+
+5. **출력 형식**
+   - 값만 간단히: "561억 원" 또는 "23.5%"
+   - 여러 기간: "24년 3분기 561억 원, 25년 2분기 390억 원"
 
 반드시 다음 형식으로 답변:
 [항목명]: 추출된 내용
@@ -1911,12 +1945,20 @@ with tab2:
     st.markdown("### 📄 기업 보고서 (필수)")
     uploaded_file = st.file_uploader("기업 사업보고서 PDF 업로드", type=['pdf'], key="main_pdf")
     
-    # 고급 분석 옵션
+    # 고급 분석 옵션 - 기본값을 True로 변경하고 강조
+    st.markdown("---")
+    st.markdown("### ⚙️ 추출 옵션")
+    
     use_ocr_mode = st.checkbox(
-        "📊 표 구조 인식 모드 (Upstage Document Parse)",
-        value=False,
-        help="표, 그래프가 많은 PDF에 사용하세요. 데이터를 구조화하여 추출합니다."
+        "📊 표 구조 인식 모드 (Upstage Document Parse) 🔥 권장",
+        value=True,  # 기본값 True로 변경
+        help="⭐ 재무제표, 실적 데이터가 포함된 PDF는 반드시 활성화하세요! 표를 인식하지 못하면 영업이익, 매출액 등을 추출할 수 없습니다."
     )
+    
+    if not use_ocr_mode:
+        st.warning("⚠️ 표 구조 인식을 비활성화하면 재무 데이터 추출 성공률이 낮아집니다.")
+    else:
+        st.success("✅ 표 구조를 자동으로 인식하여 정확한 데이터 추출이 가능합니다!")
     
     # 참고자료 PDF 업로드 (RAG)
     st.markdown("---")
