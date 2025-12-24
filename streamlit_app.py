@@ -347,6 +347,275 @@ def log_execution_time(step_name):
         return wrapper
     return decorator
 
+def log_data_quality(
+    selected_keywords,
+    ocr_raw_text,
+    ocr_structured_data,
+    llm_extracted_data,
+    llm_extraction_time_ms,
+    company_name=None,
+    pdf_filename=None,
+    pdf_pages=None,
+    report_content=None,
+    report_generation_time_ms=None
+):
+    """데이터 품질 검증 로그 기록 - OCR, LLM 추출, 보고서 생성 비교"""
+    if not supabase_client or not st.session_state.current_test_session_id:
+        return None
+    
+    try:
+        # 추출 성공률 계산
+        keywords_with_data = sum(1 for v in llm_extracted_data.values() if v and v != "정보 없음")
+        keywords_missing_data = len(llm_extracted_data) - keywords_with_data
+        extraction_success_rate = (keywords_with_data / len(llm_extracted_data) * 100) if llm_extracted_data else 0
+        
+        # 표 개수 계산
+        ocr_tables_count = len(ocr_structured_data.get('tables', [])) if ocr_structured_data else 0
+        
+        log_data = {
+            "session_id": st.session_state.current_test_session_id,
+            "user_name": st.session_state.user_name,
+            "company_name": company_name,
+            
+            # 1. 선택된 키워드
+            "selected_keywords": selected_keywords,
+            
+            # 2. OCR 원본 데이터
+            "ocr_raw_text": ocr_raw_text[:10000] if ocr_raw_text else None,  # 처음 10000자만 저장
+            "ocr_structured_data": ocr_structured_data,
+            "ocr_tables_count": ocr_tables_count,
+            
+            # 3. LLM 추출 데이터
+            "llm_extracted_data": llm_extracted_data,
+            "llm_model": "gpt-4o-mini",
+            "llm_extraction_time_ms": llm_extraction_time_ms,
+            
+            # 4. 보고서 데이터
+            "report_generated": report_content is not None,
+            "report_content": report_content[:20000] if report_content else None,  # 처음 20000자만 저장
+            "report_model": "gpt-4o-mini" if report_content else None,
+            "report_generation_time_ms": report_generation_time_ms,
+            
+            # 5. 품질 메트릭
+            "extraction_success_rate": round(extraction_success_rate, 2),
+            "keywords_with_data": keywords_with_data,
+            "keywords_missing_data": keywords_missing_data,
+            
+            # 6. 기타
+            "pdf_filename": pdf_filename,
+            "pdf_pages": pdf_pages,
+        }
+        
+        result = supabase_client.table("data_quality_logs").insert(log_data).execute()
+        
+        if result.data and len(result.data) > 0:
+            log_id = result.data[0]['id']
+            print(f"✅ 데이터 품질 로그 저장 완료: {log_id}")
+            return log_id
+        
+        return None
+        
+    except Exception as e:
+        print(f"❌ 데이터 품질 로그 저장 실패: {e}")
+        traceback.print_exc()
+        return None
+
+def generate_quality_log_txt(log_data):
+    """데이터 품질 로그를 AI 분석용 TXT 파일로 변환"""
+    
+    # 기본 정보
+    company = log_data.get('company_name', 'Unknown')
+    user = log_data.get('user_name', 'N/A')
+    created_at = log_data.get('created_at', 'N/A')[:19].replace('T', ' ')
+    pdf_filename = log_data.get('pdf_filename', 'N/A')
+    pdf_pages = log_data.get('pdf_pages', 0)
+    
+    # 품질 메트릭
+    success_rate = log_data.get('extraction_success_rate', 0)
+    keywords_success = log_data.get('keywords_with_data', 0)
+    keywords_failed = log_data.get('keywords_missing_data', 0)
+    ocr_tables = log_data.get('ocr_tables_count', 0)
+    
+    # 키워드, OCR, LLM 데이터
+    keywords = log_data.get('selected_keywords', [])
+    ocr_raw = log_data.get('ocr_raw_text', '')
+    structured_data = log_data.get('ocr_structured_data', {})
+    extracted = log_data.get('llm_extracted_data', {})
+    report = log_data.get('report_content', '')
+    
+    # TXT 파일 생성
+    txt = []
+    txt.append("=" * 80)
+    txt.append("데이터 품질 검증 로그 - AI 분석용")
+    txt.append("=" * 80)
+    txt.append("")
+    txt.append("[기본 정보]")
+    txt.append(f"- 회사명: {company}")
+    txt.append(f"- 사용자: {user}")
+    txt.append(f"- 작성일: {created_at}")
+    txt.append(f"- PDF 파일: {pdf_filename}")
+    txt.append(f"- PDF 페이지: {pdf_pages}페이지")
+    txt.append("")
+    txt.append("[품질 메트릭]")
+    txt.append(f"- 추출 성공률: {success_rate}%")
+    txt.append(f"- 성공: {keywords_success}개")
+    txt.append(f"- 실패: {keywords_failed}개")
+    txt.append(f"- OCR 표 인식: {ocr_tables}개")
+    txt.append("")
+    
+    # 1. 선택된 키워드
+    txt.append("=" * 80)
+    txt.append("1. 선택된 추출 키워드")
+    txt.append("=" * 80)
+    txt.append("")
+    if keywords:
+        for idx, kw in enumerate(keywords, 1):
+            txt.append(f"{idx}. {kw}")
+        txt.append("")
+        txt.append(f"(총 {len(keywords)}개 키워드)")
+    else:
+        txt.append("키워드 정보 없음")
+    txt.append("")
+    txt.append("")
+    
+    # 2. OCR 원본 데이터
+    txt.append("=" * 80)
+    txt.append("2. OCR 원본 데이터 (Upstage Parse)")
+    txt.append("=" * 80)
+    txt.append("")
+    
+    # 표 데이터
+    if structured_data and structured_data.get('tables'):
+        txt.append(f"[표 데이터 - 총 {len(structured_data['tables'])}개]")
+        txt.append("")
+        for idx, table in enumerate(structured_data['tables'][:5], 1):  # 최대 5개
+            txt.append(f"--- 표 {idx} (페이지 {table.get('page', '?')}) ---")
+            table_content = table.get('content', '내용 없음')
+            txt.append(table_content[:500])  # 각 표당 500자까지
+            if len(table_content) > 500:
+                txt.append("... (생략)")
+            txt.append("")
+    else:
+        txt.append("[표 데이터 없음]")
+        txt.append("")
+    
+    # 원본 텍스트
+    txt.append("[추출된 원본 텍스트]")
+    txt.append("")
+    if ocr_raw:
+        txt.append(ocr_raw[:3000])  # 처음 3000자
+        if len(ocr_raw) > 3000:
+            txt.append("")
+            txt.append("... (이하 생략)")
+    else:
+        txt.append("원본 텍스트 없음")
+    txt.append("")
+    txt.append("")
+    
+    # 3. LLM 추출 데이터
+    txt.append("=" * 80)
+    txt.append("3. LLM 추출 데이터")
+    txt.append("=" * 80)
+    txt.append("")
+    
+    if extracted:
+        # 성공/실패 구분
+        success_data = {k: v for k, v in extracted.items() if v and v != "정보 없음"}
+        failed_data = {k: v for k, v in extracted.items() if not v or v == "정보 없음"}
+        
+        txt.append(f"[✅ 성공적으로 추출된 데이터 - {len(success_data)}개]")
+        txt.append("")
+        if success_data:
+            for idx, (key, value) in enumerate(success_data.items(), 1):
+                txt.append(f"{idx}. {key}")
+                txt.append(f"   → {value}")
+                txt.append("")
+        else:
+            txt.append("없음")
+            txt.append("")
+        
+        txt.append("")
+        txt.append(f"[❌ 추출 실패 데이터 - {len(failed_data)}개]")
+        txt.append("")
+        if failed_data:
+            for idx, key in enumerate(failed_data.keys(), 1):
+                txt.append(f"{idx}. {key}")
+                txt.append(f"   → 정보 없음")
+                txt.append("")
+        else:
+            txt.append("없음")
+            txt.append("")
+    else:
+        txt.append("LLM 추출 데이터 없음")
+        txt.append("")
+    
+    txt.append("")
+    txt.append(f"[LLM 처리 정보]")
+    txt.append(f"- 모델: {log_data.get('llm_model', 'N/A')}")
+    txt.append(f"- 처리 시간: {log_data.get('llm_extraction_time_ms', 0)}ms")
+    txt.append("")
+    txt.append("")
+    
+    # 4. 보고서 (선택)
+    if log_data.get('report_generated') and report:
+        txt.append("=" * 80)
+        txt.append("4. 보고서 생성 결과 (선택)")
+        txt.append("=" * 80)
+        txt.append("")
+        txt.append(report[:2000])  # 처음 2000자
+        if len(report) > 2000:
+            txt.append("")
+            txt.append("... (이하 생략)")
+        txt.append("")
+        txt.append("")
+        txt.append(f"[보고서 생성 정보]")
+        txt.append(f"- 모델: {log_data.get('report_model', 'N/A')}")
+        txt.append(f"- 생성 시간: {log_data.get('report_generation_time_ms', 0)}ms")
+        txt.append(f"- 전체 길이: {len(report)}자")
+        txt.append("")
+        txt.append("")
+    
+    # AI 분석을 위한 질문
+    txt.append("=" * 80)
+    txt.append("AI 분석을 위한 질문")
+    txt.append("=" * 80)
+    txt.append("")
+    txt.append("이 로그를 AI에게 첨부하고 다음과 같이 요청하세요:")
+    txt.append("")
+    txt.append("1. OCR 원본 데이터에는 있는데 LLM이 추출하지 못한 정보가 있나요?")
+    txt.append("   → 어떤 키워드가 누락되었는지 구체적으로 분석해주세요.")
+    txt.append("")
+    txt.append("2. LLM이 잘못 추출한 값이 있나요?")
+    txt.append("   → OCR 원본과 비교하여 잘못된 부분을 지적해주세요.")
+    txt.append("   (예: 영업이익과 영업이익률 혼동, 단위 오류 등)")
+    txt.append("")
+    txt.append("3. 추출 실패 데이터에 대해:")
+    txt.append("   → OCR 원본에 해당 정보가 있는지 확인해주세요.")
+    txt.append("   → 있다면 왜 LLM이 찾지 못했는지 분석해주세요.")
+    txt.append("")
+    txt.append("4. 프롬프트를 어떻게 개선하면 추출 성공률을 높일 수 있나요?")
+    txt.append("   → 구체적인 프롬프트 개선안을 제시해주세요.")
+    txt.append("")
+    txt.append("5. OCR 단계에서 개선이 필요한 부분이 있나요?")
+    txt.append("   → 표 인식, 텍스트 추출 품질 등을 평가해주세요.")
+    txt.append("")
+    txt.append("")
+    txt.append("=" * 80)
+    txt.append("분석 완료 후 개선 방향")
+    txt.append("=" * 80)
+    txt.append("")
+    txt.append("AI 분석 결과를 바탕으로:")
+    txt.append("1. streamlit_app.py의 extract_all_keywords_batch() 함수 프롬프트 수정")
+    txt.append("2. OCR 설정 조정 (표 구조 인식 모드 등)")
+    txt.append("3. 키워드 정의 개선 (더 명확한 키워드명 사용)")
+    txt.append("4. 재테스트 및 성공률 비교")
+    txt.append("")
+    txt.append("=" * 80)
+    txt.append("파일 끝")
+    txt.append("=" * 80)
+    
+    return "\n".join(txt)
+
 # 보고서 섹션별 작성 지침 정의
 REPORT_SECTION_TEMPLATES = {
     "기업 개요": """1. **기업 개요**
@@ -1742,6 +2011,18 @@ with tab2:
                                 "extracted_count": len(extracted_data),
                                 "company_name": company_name_temp
                             }, extract_time)
+                            
+                            # 🆕 데이터 품질 로그 기록 - OCR vs LLM 추출 비교
+                            log_data_quality(
+                                selected_keywords=field_names,
+                                ocr_raw_text=pdf_text,
+                                ocr_structured_data=structured_data,
+                                llm_extracted_data=extracted_data,
+                                llm_extraction_time_ms=extract_time,
+                                company_name=company_name_temp,
+                                pdf_filename=uploaded_file.name,
+                                pdf_pages=num_pages
+                            )
                         
                         # Supabase에 저장
                         if supabase_client:
@@ -1984,6 +2265,29 @@ with tab3:
                             "sections": st.session_state.get('report_sections', [])
                         }, report_time)
                         
+                        # 🆕 데이터 품질 로그 업데이트 - 보고서 생성 데이터 추가
+                        if st.session_state.current_test_session_id:
+                            # 기존 로그를 찾아서 업데이트
+                            try:
+                                logs = supabase_client.table("data_quality_logs")\
+                                    .select("*")\
+                                    .eq("session_id", st.session_state.current_test_session_id)\
+                                    .order("created_at", desc=True)\
+                                    .limit(1)\
+                                    .execute()
+                                
+                                if logs.data and len(logs.data) > 0:
+                                    latest_log = logs.data[0]
+                                    supabase_client.table("data_quality_logs").update({
+                                        "report_generated": True,
+                                        "report_content": report[:20000],  # 처음 20000자만 저장
+                                        "report_model": "gpt-4o-mini",
+                                        "report_generation_time_ms": report_time
+                                    }).eq("id", latest_log['id']).execute()
+                                    print(f"✅ 데이터 품질 로그 업데이트 완료: {latest_log['id']}")
+                            except Exception as e:
+                                print(f"⚠️ 데이터 품질 로그 업데이트 실패: {e}")
+                        
                         st.rerun()
                         
                     except Exception as e:
@@ -2175,7 +2479,7 @@ if is_admin:
                 st.warning("⚠️ Supabase가 연결되지 않아 로그를 조회할 수 없습니다")
             else:
                 # 탭 구성
-                admin_tab1, admin_tab2, admin_tab3 = st.tabs(["📊 통계", "👥 사용자 목록", "📋 로그 조회"])
+                admin_tab1, admin_tab2, admin_tab3, admin_tab4 = st.tabs(["📊 통계", "👥 사용자 목록", "📋 로그 조회", "🔍 데이터 품질 비교"])
                 
                 with admin_tab1:
                     st.markdown("### 📊 테스트 통계")
@@ -2351,4 +2655,245 @@ if is_admin:
                                         key="download_all_logs"
                                     )
                             except Exception as e:
-                                st.error(f"다운로드 실패: {e}")
+                                st.error(f"다운로드 실패: {e}")                
+                with admin_tab4:
+                    st.markdown("### 🔍 데이터 품질 비교 분석")
+                    st.info("📊 OCR 추출 → LLM 데이터 추출 → 보고서 생성 과정을 비교하여 데이터 품질을 검증합니다")
+                    
+                    try:
+                        # 데이터 품질 로그 조회
+                        quality_logs = supabase_client.table("data_quality_logs")\
+                            .select("*")\
+                            .order("created_at", desc=True)\
+                            .limit(50)\
+                            .execute()
+                        
+                        if not quality_logs.data:
+                            st.warning("아직 데이터 품질 로그가 없습니다. 데이터 추출을 먼저 진행하세요.")
+                        else:
+                            # 로그 목록 표시
+                            st.markdown(f"**총 {len(quality_logs.data)}개의 품질 로그**")
+                            
+                            # 로그 선택
+                            log_options = []
+                            for log in quality_logs.data:
+                                created_at = log.get('created_at', 'N/A')[:19].replace('T', ' ')
+                                company = log.get('company_name', 'Unknown')
+                                user = log.get('user_name', 'N/A')
+                                keywords_count = len(log.get('selected_keywords', []))
+                                success_rate = log.get('extraction_success_rate', 0)
+                                report_gen = "✅ 보고서 있음" if log.get('report_generated') else "❌ 보고서 없음"
+                                
+                                log_options.append(
+                                    f"{created_at} | {company} | {user} | 키워드 {keywords_count}개 | 성공률 {success_rate}% | {report_gen}"
+                                )
+                            
+                            selected_log_idx = st.selectbox(
+                                "분석할 로그 선택",
+                                range(len(log_options)),
+                                format_func=lambda x: log_options[x]
+                            )
+                            
+                            if selected_log_idx is not None:
+                                selected_log = quality_logs.data[selected_log_idx]
+                                
+                                st.markdown("---")
+                                st.markdown("## 📋 상세 비교 분석")
+                                
+                                # 기본 정보
+                                col1, col2, col3, col4 = st.columns(4)
+                                col1.metric("회사명", selected_log.get('company_name', 'N/A'))
+                                col2.metric("키워드 수", len(selected_log.get('selected_keywords', [])))
+                                col3.metric("추출 성공률", f"{selected_log.get('extraction_success_rate', 0)}%")
+                                col4.metric("표 인식", f"{selected_log.get('ocr_tables_count', 0)}개")
+                                
+                                st.markdown("---")
+                                
+                                # 3단계 비교 탭
+                                comp_tab1, comp_tab2, comp_tab3, comp_tab4 = st.tabs([
+                                    "1️⃣ 선택된 키워드", 
+                                    "2️⃣ OCR 원본 데이터", 
+                                    "3️⃣ LLM 추출 데이터",
+                                    "4️⃣ 보고서 생성 결과"
+                                ])
+                                
+                                with comp_tab1:
+                                    st.markdown("### 📌 사용자가 선택한 추출 키워드")
+                                    keywords = selected_log.get('selected_keywords', [])
+                                    
+                                    if keywords:
+                                        cols = st.columns(4)
+                                        for idx, kw in enumerate(keywords):
+                                            col = cols[idx % 4]
+                                            col.markdown(f"""
+                                            <div style='
+                                                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                                                color: white;
+                                                padding: 10px;
+                                                border-radius: 8px;
+                                                text-align: center;
+                                                margin: 5px 0;
+                                                font-weight: 500;
+                                            '>
+                                                {kw}
+                                            </div>
+                                            """, unsafe_allow_html=True)
+                                        st.caption(f"총 {len(keywords)}개의 키워드가 선택되었습니다")
+                                    else:
+                                        st.warning("키워드 정보가 없습니다")
+                                
+                                with comp_tab2:
+                                    st.markdown("### 📄 OCR 원본 추출 데이터 (Upstage Parse)")
+                                    
+                                    # 표 데이터
+                                    structured_data = selected_log.get('ocr_structured_data', {})
+                                    if structured_data and structured_data.get('tables'):
+                                        st.markdown(f"#### 📊 인식된 표 ({len(structured_data['tables'])}개)")
+                                        for idx, table in enumerate(structured_data['tables'][:3]):
+                                            with st.expander(f"표 {idx+1} (페이지 {table.get('page', '?')})"):
+                                                st.text(table.get('content', '내용 없음')[:1000])
+                                    else:
+                                        st.info("구조화된 표 데이터가 없습니다")
+                                    
+                                    # 원본 텍스트
+                                    st.markdown("#### 📝 추출된 원본 텍스트 (일부)")
+                                    raw_text = selected_log.get('ocr_raw_text', '')
+                                    if raw_text:
+                                        st.text_area("OCR 원본", raw_text[:2000], height=300)
+                                        st.caption(f"전체 길이: {len(raw_text)}자 (처음 2000자 표시)")
+                                    else:
+                                        st.warning("원본 텍스트가 없습니다")
+                                
+                                with comp_tab3:
+                                    st.markdown("### 🤖 LLM이 추출한 데이터")
+                                    
+                                    extracted = selected_log.get('llm_extracted_data', {})
+                                    if extracted:
+                                        # 성공/실패 구분
+                                        success_data = {k: v for k, v in extracted.items() if v and v != "정보 없음"}
+                                        failed_data = {k: v for k, v in extracted.items() if not v or v == "정보 없음"}
+                                        
+                                        col1, col2 = st.columns(2)
+                                        col1.metric("✅ 추출 성공", len(success_data))
+                                        col2.metric("❌ 추출 실패", len(failed_data))
+                                        
+                                        st.markdown("---")
+                                        
+                                        # 성공한 데이터
+                                        st.markdown("#### ✅ 성공적으로 추출된 데이터")
+                                        if success_data:
+                                            for key, value in success_data.items():
+                                                st.markdown(f"**{key}**")
+                                                st.markdown(f"""
+                                                <div style='
+                                                    background: #f0fdf4;
+                                                    border-left: 4px solid #22c55e;
+                                                    padding: 10px 15px;
+                                                    margin: 5px 0 15px 0;
+                                                    border-radius: 4px;
+                                                '>
+                                                    {value}
+                                                </div>
+                                                """, unsafe_allow_html=True)
+                                        else:
+                                            st.info("추출된 데이터가 없습니다")
+                                        
+                                        st.markdown("---")
+                                        
+                                        # 실패한 데이터
+                                        if failed_data:
+                                            st.markdown("#### ❌ 추출 실패 데이터")
+                                            for key in failed_data.keys():
+                                                st.markdown(f"""
+                                                <div style='
+                                                    background: #fef2f2;
+                                                    border-left: 4px solid #ef4444;
+                                                    padding: 10px 15px;
+                                                    margin: 5px 0;
+                                                    border-radius: 4px;
+                                                    color: #991b1b;
+                                                '>
+                                                    <strong>{key}</strong>: 정보 없음
+                                                </div>
+                                                """, unsafe_allow_html=True)
+                                        
+                                        # LLM 메타데이터
+                                        st.markdown("---")
+                                        st.caption(f"모델: {selected_log.get('llm_model', 'N/A')} | "
+                                                 f"처리 시간: {selected_log.get('llm_extraction_time_ms', 0)}ms")
+                                    else:
+                                        st.warning("추출된 데이터가 없습니다")
+                                
+                                with comp_tab4:
+                                    st.markdown("### 📄 최종 생성된 보고서")
+                                    
+                                    if selected_log.get('report_generated'):
+                                        report = selected_log.get('report_content', '')
+                                        if report:
+                                            st.markdown(report)
+                                            
+                                            st.markdown("---")
+                                            st.caption(f"모델: {selected_log.get('report_model', 'N/A')} | "
+                                                     f"생성 시간: {selected_log.get('report_generation_time_ms', 0)}ms | "
+                                                     f"길이: {len(report)}자")
+                                        else:
+                                            st.warning("보고서 내용이 없습니다")
+                                    else:
+                                        st.info("아직 보고서가 생성되지 않았습니다")
+                                
+                                # 전체 비교 요약
+                                st.markdown("---")
+                                st.markdown("## 📊 종합 비교 요약")
+                                
+                                col1, col2, col3 = st.columns(3)
+                                
+                                with col1:
+                                    st.markdown("### 1️⃣ OCR 단계")
+                                    st.metric("표 인식", f"{selected_log.get('ocr_tables_count', 0)}개")
+                                    st.metric("텍스트 길이", f"{len(selected_log.get('ocr_raw_text', ''))}자")
+                                
+                                with col2:
+                                    st.markdown("### 2️⃣ LLM 추출")
+                                    st.metric("성공", selected_log.get('keywords_with_data', 0))
+                                    st.metric("실패", selected_log.get('keywords_missing_data', 0))
+                                    st.metric("성공률", f"{selected_log.get('extraction_success_rate', 0)}%")
+                                
+                                with col3:
+                                    st.markdown("### 3️⃣ 보고서 생성")
+                                    if selected_log.get('report_generated'):
+                                        st.success("✅ 생성 완료")
+                                        st.metric("길이", f"{len(selected_log.get('report_content', ''))}자")
+                                    else:
+                                        st.error("❌ 미생성")
+                                
+                                # TXT 파일로 내보내기 버튼
+                                st.markdown("---")
+                                st.markdown("## 📥 AI 분석용 TXT 파일 내보내기")
+                                st.info("💡 이 로그를 TXT 파일로 다운로드하여 AI에게 첨부하면, 자동으로 문제점을 분석하고 개선 방안을 제시받을 수 있습니다.")
+                                
+                                if st.button("📥 TXT 파일로 내보내기", type="primary", use_container_width=True):
+                                    # TXT 파일 생성
+                                    txt_content = generate_quality_log_txt(selected_log)
+                                    
+                                    # 파일명 생성
+                                    company = selected_log.get('company_name', 'Unknown').replace(' ', '_')
+                                    created_at = selected_log.get('created_at', '')[:10]
+                                    filename = f"quality_log_{company}_{created_at}.txt"
+                                    
+                                    # 다운로드 버튼
+                                    st.download_button(
+                                        label="💾 다운로드",
+                                        data=txt_content,
+                                        file_name=filename,
+                                        mime="text/plain",
+                                        use_container_width=True
+                                    )
+                                    
+                                    st.success("✅ TXT 파일이 생성되었습니다! 다운로드 버튼을 클릭하세요.")
+                                    
+                                    with st.expander("📋 파일 미리보기"):
+                                        st.text(txt_content[:2000] + "\n\n... (전체 내용은 다운로드하세요)")
+                    
+                    except Exception as e:
+                        st.error(f"데이터 품질 로그 조회 실패: {e}")
+                        st.code(traceback.format_exc())
