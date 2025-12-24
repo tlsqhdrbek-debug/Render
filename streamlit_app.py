@@ -1132,10 +1132,18 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
             "document": (getattr(pdf_file, 'name', 'document.pdf'), pdf_bytes, "application/pdf")
         }
         
-        # OCR 강제 사용 (이미지 기반 PDF도 처리)
+        # OCR 강제 사용 + 모든 요소 타입 추출 + 고급 옵션
         data = {
-            "ocr": "force",
-            "output_formats": "text,html"  # 텍스트와 HTML 둘 다 요청
+            "ocr": "force",  # Always apply OCR
+            "model": "document-parse-en",  # 또는 enhanced 모델
+            "output_formats": "text,html,markdown",  # 모든 포맷 요청
+            "coordinates": "true",  # 좌표 정보 (bounding boxes)
+            "merge_multipage_tables": "true",  # ⭐ 여러 페이지 표 병합
+            # 모든 문서 요소 타입 명시적으로 요청
+            "base64_encoding": [
+                "figure", "table", "chart", "header", "paragraph", 
+                "list", "equation", "caption", "index", "footnote"
+            ]
         }
         
         response = requests.post(
@@ -1153,10 +1161,26 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
         
         result = response.json()
         
+        # 디버그: 응답 구조 확인
+        with st.expander("🔍 디버그: Upstage API 응답 구조"):
+            st.write("**응답 키:**", list(result.keys()))
+            if "content" in result:
+                st.write("**Content 키:**", list(result["content"].keys()))
+            if "pages" in result:
+                st.write(f"**페이지 수:** {len(result['pages'])}")
+                if result['pages']:
+                    first_page = result['pages'][0]
+                    st.write("**첫 페이지 키:**", list(first_page.keys()))
+                    if "elements" in first_page:
+                        st.write(f"**첫 페이지 요소 수:** {len(first_page['elements'])}")
+                        if first_page['elements']:
+                            st.write("**첫 요소 예시:**", first_page['elements'][0])
+        
         # 구조화된 텍스트 추출
         content = result.get("content", {})
         text = content.get("text", "")
         html = content.get("html", "")
+        markdown = content.get("markdown", "")  # 마크다운도 추출
         
         # 페이지별 정보와 요소 추출
         pages = result.get("pages", [])
