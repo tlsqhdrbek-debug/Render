@@ -381,7 +381,7 @@ def log_data_quality(
             "selected_keywords": selected_keywords,
             
             # 2. OCR 원본 데이터
-            "ocr_raw_text": ocr_raw_text[:10000] if ocr_raw_text else None,  # 처음 10000자만 저장
+            "ocr_raw_text": ocr_raw_text[:20000] if ocr_raw_text else None,  # 처음 20000자만 저장 (재무표 전체 포함)
             "ocr_structured_data": ocr_structured_data,
             "ocr_tables_count": ocr_tables_count,
             
@@ -488,11 +488,11 @@ def generate_quality_log_txt(log_data):
     if structured_data and structured_data.get('tables'):
         txt.append(f"[표 데이터 - 총 {len(structured_data['tables'])}개]")
         txt.append("")
-        for idx, table in enumerate(structured_data['tables'][:5], 1):  # 최대 5개
+        for idx, table in enumerate(structured_data['tables'][:10], 1):  # 최대 10개로 증가
             txt.append(f"--- 표 {idx} (페이지 {table.get('page', '?')}) ---")
             table_content = table.get('content', '내용 없음')
-            txt.append(table_content[:500])  # 각 표당 500자까지
-            if len(table_content) > 500:
+            txt.append(table_content[:1000])  # 각 표당 1000자로 증가 (재무표 전체 포함)
+            if len(table_content) > 1000:
                 txt.append("... (생략)")
             txt.append("")
     else:
@@ -503,8 +503,8 @@ def generate_quality_log_txt(log_data):
     txt.append("[추출된 원본 텍스트]")
     txt.append("")
     if ocr_raw:
-        txt.append(ocr_raw[:3000])  # 처음 3000자
-        if len(ocr_raw) > 3000:
+        txt.append(ocr_raw[:5000])  # 처음 5000자로 증가 (재무표 전체 포함)
+        if len(ocr_raw) > 5000:
             txt.append("")
             txt.append("... (이하 생략)")
     else:
@@ -1429,11 +1429,11 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
                     context_info += f"  • 페이지 {heading.get('page', '?')}: {heading_text}\n"
                 context_info += "\n"
         
-        # 텍스트 길이 조정 - 표가 있으면 짧게, 없으면 길게
+        # 텍스트 길이 조정 - 표가 있으면 중간, 없으면 길게
         if has_structured_tables:
-            text_preview = text[:3000]  # 표가 있으면 텍스트는 보조 자료
+            text_preview = text[:5000]  # 표가 있어도 재무표 전체를 포함하도록 증가
         else:
-            text_preview = text[:8000]  # 표가 없으면 텍스트에서 직접 찾아야 함
+            text_preview = text[:10000]  # 표가 없으면 텍스트에서 직접 찾아야 함
         
         # 모든 필드를 한 번에 요청
         fields_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(field_names)])
@@ -1451,8 +1451,10 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
 2. **재무 데이터 추출 패턴**
    - 영업이익: "Operating Profit", "영업이익" 행 찾기
    - 영업이익률: "Operating Margin", "영업이익률" 행 (% 단위)
+   - 순이익: "Net Profit", "Net Income", "당기순이익", "순이익" 행 찾기
    - 분기별 데이터: "24.3Q", "25.2Q", "25.3Q" 등의 열
    - 최신 분기 데이터를 우선 추출하세요
+   - 재무제표는 보통 "자산총계", "부채총계", "자본총계" 다음에 손익계산서가 나옵니다
 
 3. **단위 인식**
    - "단위: 억원", "(억 원)" → 숫자 뒤에 "억 원" 추가
@@ -1473,10 +1475,11 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
    - 파이프(|) 구분자로 열을 나눠 파싱하세요
 
 2. **섹션별 탐색 우선순위**
-   ① "Financial Results", "경영실적", "영업실적"
-   ② "재무정보", "재무현황"
+   ① "Financial Results", "경영실적", "영업실적", "손익계산서"
+   ② "재무정보", "재무현황", "재무상태표"
    ③ 차트 제목 및 데이터 (Chart Title, Chart Type)
    ④ 키워드 직접 검색
+   ⚠️ 재무표가 여러 페이지에 걸쳐 있을 수 있으니 전체를 스캔하세요
 
 3. **패턴 매칭**
    - "매출액: 2,345억 원" → "2,345억 원"
