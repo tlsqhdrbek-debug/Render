@@ -1132,13 +1132,13 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
             "document": (getattr(pdf_file, 'name', 'document.pdf'), pdf_bytes, "application/pdf")
         }
         
-        # Upstage Document Parse API 파라미터 (표 인식 최적화)
+        # Upstage Document Parse API 파라미터 (표 + 차트 인식)
         data = {
             "ocr": "force",  # Always apply OCR
             "model": "document-parse",  # 명시적으로 모델 지정
             "output_formats": "['text', 'html', 'markdown']",  # JSON 배열을 문자열로
             "coordinates": "true",  # 좌표 정보 포함
-            "base64_encoding": "['table']",  # 표를 base64로 인코딩
+            "base64_encoding": "['table', 'figure']",  # 표와 차트/그래프 모두 인코딩
         }
         
         response = requests.post(
@@ -1180,9 +1180,10 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
         # API v2.0 응답 구조: elements 배열에서 직접 추출
         elements_list = result.get("elements", [])
         
-        # 구조화된 데이터 추출 (표, 제목, 리스트 등)
+        # 구조화된 데이터 추출 (표, 차트, 제목, 리스트 등)
         structured_elements = {
             "tables": [],
+            "charts": [],  # 차트/그래프 추가
             "headings": [],
             "paragraphs": [],
             "lists": []
@@ -1205,6 +1206,14 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
                     "content": elem_text or elem_html or elem_markdown,
                     "html": elem_html,
                     "markdown": elem_markdown
+                })
+            elif "figure" in elem_category.lower() or "chart" in elem_category.lower() or "image" in elem_category.lower():
+                structured_elements["charts"].append({
+                    "page": elem_page,
+                    "content": elem_text or elem_html or elem_markdown,
+                    "html": elem_html,
+                    "markdown": elem_markdown,
+                    "category": elem_category
                 })
             elif "heading" in elem_category.lower() or "title" in elem_category.lower():
                 structured_elements["headings"].append({
@@ -1230,10 +1239,11 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
         else:
             num_pages = len(pages)
         
-        # 표 정보 추출
+        # 표 및 차트 정보 추출
         table_count = len(structured_elements["tables"])
+        chart_count = len(structured_elements["charts"])
         
-        st.success(f"✅ Upstage 분석 완료: {num_pages}페이지, {len(text)}자, **표 {table_count}개** 인식")
+        st.success(f"✅ Upstage 분석 완료: {num_pages}페이지, {len(text)}자, **표 {table_count}개, 차트 {chart_count}개** 인식")
         
         # 표가 인식되었을 때 상세 정보 표시
         if table_count > 0:
@@ -1245,10 +1255,20 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
                         st.text(table_content[:300] + ("..." if len(table_content) > 300 else ""))
                     st.markdown("---")
         
-        # 디버그: 표 인식 실패 시 경고
-        if table_count == 0 and num_pages > 0:
-            st.warning("⚠️ Upstage가 표를 인식하지 못했습니다.")
-            st.info("**가능한 원인:**\n- PDF가 이미지 스캔본 (OCR 품질 저하)\n- 표 구조가 복잡하거나 비정형\n- 텍스트로 된 표 형식 데이터")
+        # 차트가 인식되었을 때 상세 정보 표시
+        if chart_count > 0:
+            with st.expander(f"📈 인식된 차트/그래프 정보 ({chart_count}개)"):
+                for idx, chart in enumerate(structured_elements["charts"][:3], 1):  # 최대 3개만 표시
+                    st.write(f"**차트 {idx} (페이지 {chart.get('page', '?')}) - {chart.get('category', 'unknown')}**")
+                    chart_content = chart.get('content', '') or chart.get('html', '')
+                    if chart_content:
+                        st.text(chart_content[:300] + ("..." if len(chart_content) > 300 else ""))
+                    st.markdown("---")
+        
+        # 디버그: 표/차트 인식 실패 시 경고
+        if table_count == 0 and chart_count == 0 and num_pages > 0:
+            st.warning("⚠️ Upstage가 표와 차트를 인식하지 못했습니다.")
+            st.info("**가능한 원인:**\n- PDF가 이미지 스캔본 (OCR 품질 저하)\n- 표/차트 구조가 복잡하거나 비정형\n- 텍스트로 된 표 형식 데이터")
             st.info("💡 **해결 방법:** LLM이 텍스트에서 직접 표 데이터를 추출하도록 프롬프트가 최적화되어 있습니다.")
             
             # 디버그 정보
@@ -1259,6 +1279,7 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
                 st.write(f"- 단락: {len(structured_elements['paragraphs'])}개")
                 st.write(f"- 리스트: {len(structured_elements['lists'])}개")
                 st.write(f"- 표: {len(structured_elements['tables'])}개")
+                st.write(f"- 차트: {len(structured_elements['charts'])}개")
                 
                 # elements 카테고리 분포
                 categories = {}
@@ -1382,6 +1403,22 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
                         context_info += f"```\n{table_content[:1000]}\n```\n\n"
                     
                 context_info += "\n⚠️ **중요:** 재무 데이터(매출액, 영업이익 등)는 반드시 위 표에서 추출하세요!\n\n"
+                context_info += "="*60 + "\n\n"
+            
+            # 차트/그래프 데이터 추가
+            if structured_data.get("charts"):
+                context_info += "\n\n" + "="*60 + "\n"
+                context_info += "📈 **인식된 차트/그래프 데이터**\n"
+                context_info += "="*60 + "\n\n"
+                
+                for idx, chart in enumerate(structured_data['charts'][:3]):  # 최대 3개
+                    context_info += f"▶ **[차트 {idx+1}] (페이지 {chart.get('page', '?')}) - {chart.get('category', 'chart')}**\n\n"
+                    
+                    chart_content = chart.get('content', '') or chart.get('html', '')
+                    if chart_content:
+                        context_info += f"```\n{chart_content[:500]}\n```\n\n"
+                
+                context_info += "\n💡 차트 데이터에서 추출할 수 있는 정보(성장률, 추세 등)를 활용하세요.\n\n"
                 context_info += "="*60 + "\n\n"
             
             # 주요 제목 요약 (문서 구조 파악용)
