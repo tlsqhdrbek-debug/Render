@@ -1048,8 +1048,8 @@ def retrieve_relevant_context(query, company_id=None, max_tokens=3000):
 # ============================================
 import requests
 
-# Upstage API URL (API 키는 위에서 이미 로드됨)
-UPSTAGE_API_URL = "https://api.upstage.ai/v1/document-ai/document-parse"
+# Upstage API URL (최신 Document Digitization API)
+UPSTAGE_API_URL = "https://api.upstage.ai/v1/document-digitization"
 
 def check_upstage_available():
     """Upstage API 키 설정 확인"""
@@ -1132,10 +1132,13 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
             "document": (getattr(pdf_file, 'name', 'document.pdf'), pdf_bytes, "application/pdf")
         }
         
-        # Upstage Document Parse API 파라미터 (검증된 옵션만 사용)
+        # Upstage Document Parse API 파라미터 (표 인식 최적화)
         data = {
             "ocr": "force",  # Always apply OCR
-            "output_formats": ["text", "html", "markdown"],  # 여러 포맷 요청
+            "model": "document-parse",  # 명시적으로 모델 지정
+            "output_formats": "['text', 'html', 'markdown']",  # JSON 배열을 문자열로
+            "coordinates": "true",  # 좌표 정보 포함
+            "base64_encoding": "['table']",  # 표를 base64로 인코딩
         }
         
         response = requests.post(
@@ -1174,9 +1177,8 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
         html = content.get("html", "")
         markdown = content.get("markdown", "")  # 마크다운도 추출
         
-        # 페이지별 정보와 요소 추출
-        pages = result.get("pages", [])
-        num_pages = len(pages)
+        # API v2.0 응답 구조: elements 배열에서 직접 추출
+        elements_list = result.get("elements", [])
         
         # 구조화된 데이터 추출 (표, 제목, 리스트 등)
         structured_elements = {
@@ -1186,63 +1188,120 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
             "lists": []
         }
         
-        for page_data in pages[:max_pages]:
-            elements = page_data.get("elements", [])
-            for element in elements:
-                elem_type = element.get("category", "")
-                elem_content = element.get("text", "")
-                
-                if "table" in elem_type.lower():
-                    structured_elements["tables"].append({
-                        "page": page_data.get("page"),
-                        "content": elem_content,
-                        "html": element.get("html", "")
-                    })
-                elif "heading" in elem_type.lower() or "title" in elem_type.lower():
-                    structured_elements["headings"].append({
-                        "page": page_data.get("page"),
-                        "content": elem_content
-                    })
-                elif "list" in elem_type.lower():
-                    structured_elements["lists"].append({
-                        "page": page_data.get("page"),
-                        "content": elem_content
-                    })
-                else:
-                    structured_elements["paragraphs"].append({
-                        "page": page_data.get("page"),
-                        "content": elem_content
-                    })
+        # elements 배열에서 직접 추출 (v2.0 API)
+        for element in elements_list:
+            elem_category = element.get("category", "")
+            elem_content = element.get("content", {})
+            elem_page = element.get("page", 0)
+            
+            # content는 dict 형태 {html, markdown, text}
+            elem_html = elem_content.get("html", "") if isinstance(elem_content, dict) else ""
+            elem_text = elem_content.get("text", "") if isinstance(elem_content, dict) else str(elem_content)
+            elem_markdown = elem_content.get("markdown", "") if isinstance(elem_content, dict) else ""
+            
+            if "table" in elem_category.lower():
+                structured_elements["tables"].append({
+                    "page": elem_page,
+                    "content": elem_text or elem_html or elem_markdown,
+                    "html": elem_html,
+                    "markdown": elem_markdown
+                })
+            elif "heading" in elem_category.lower() or "title" in elem_category.lower():
+                structured_elements["headings"].append({
+                    "page": elem_page,
+                    "content": elem_text or elem_html
+                })
+            elif "list" in elem_category.lower():
+                structured_elements["lists"].append({
+                    "page": elem_page,
+                    "content": elem_text or elem_html
+                })
+            elif "paragraph" in elem_category.lower():
+                structured_elements["paragraphs"].append({
+                    "page": elem_page,
+                    "content": elem_text or elem_html
+                })
         
-        # 표 정보 추출 (HTML에서)
+        # 페이지별 정보 (호환성 유지)
+        pages = result.get("pages", [])
+        if not pages and elements_list:
+            # pages가 없으면 elements로부터 생성
+            num_pages = max([e.get("page", 1) for e in elements_list] + [1])
+        else:
+            num_pages = len(pages)
+        
+        # 표 정보 추출
         table_count = len(structured_elements["tables"])
         
-        st.success(f"✅ Upstage 분석 완료: {num_pages}페이지, {len(text)}자, 표 {table_count}개 인식")
+        st.success(f"✅ Upstage 분석 완료: {num_pages}페이지, {len(text)}자, **표 {table_count}개** 인식")
+        
+        # 표가 인식되었을 때 상세 정보 표시
+        if table_count > 0:
+            with st.expander(f"📊 인식된 표 정보 ({table_count}개)"):
+                for idx, table in enumerate(structured_elements["tables"][:3], 1):  # 최대 3개만 표시
+                    st.write(f"**표 {idx} (페이지 {table.get('page', '?')})**")
+                    table_content = table.get('html', '') or table.get('content', '')
+                    if table_content:
+                        st.text(table_content[:300] + ("..." if len(table_content) > 300 else ""))
+                    st.markdown("---")
         
         # 디버그: 표 인식 실패 시 경고
         if table_count == 0 and num_pages > 0:
-            st.warning("⚠️ Upstage가 표를 인식하지 못했습니다. PDF가 이미지 기반이거나 표가 복잡한 구조일 수 있습니다.")
-            st.info("💡 LLM이 텍스트에서 직접 재무 데이터를 추출하도록 프롬프트가 개선되었습니다.")
+            st.warning("⚠️ Upstage가 표를 인식하지 못했습니다.")
+            st.info("**가능한 원인:**\n- PDF가 이미지 스캔본 (OCR 품질 저하)\n- 표 구조가 복잡하거나 비정형\n- 텍스트로 된 표 형식 데이터")
+            st.info("💡 **해결 방법:** LLM이 텍스트에서 직접 표 데이터를 추출하도록 프롬프트가 최적화되어 있습니다.")
             
             # 디버그 정보
-            with st.expander("🔍 디버그: Upstage 응답 구조"):
-                st.write(f"- 총 요소 수: {sum(len(structured_elements[k]) for k in structured_elements)}")
+            with st.expander("🔍 디버그: Upstage 응답 분석"):
+                st.write("**API 응답 구조:**")
+                st.write(f"- 전체 요소 수: {len(elements_list)}개")
                 st.write(f"- 제목: {len(structured_elements['headings'])}개")
                 st.write(f"- 단락: {len(structured_elements['paragraphs'])}개")
                 st.write(f"- 리스트: {len(structured_elements['lists'])}개")
                 st.write(f"- 표: {len(structured_elements['tables'])}개")
+                
+                # elements 카테고리 분포
+                categories = {}
+                for elem in elements_list[:50]:  # 최대 50개
+                    cat = elem.get("category", "unknown")
+                    categories[cat] = categories.get(cat, 0) + 1
+                
+                if categories:
+                    st.write("\n**요소 카테고리 분포:**")
+                    for cat, count in sorted(categories.items(), key=lambda x: x[1], reverse=True):
+                        st.write(f"  - {cat}: {count}개")
         
         # 세션에 구조화된 데이터 저장
         st.session_state.structured_data = structured_elements
         
-        # 페이지별 텍스트 구조화
+        # 페이지별 텍스트 구조화 (elements로부터 재구성)
         structured_text = ""
-        for i, page_data in enumerate(pages[:max_pages]):
-            page_num = page_data.get("page", i+1)
-            page_text = page_data.get("text", "")
-            structured_text += f"\n\n=== 페이지 {page_num} ===\n\n{page_text}"
+        if elements_list:
+            # elements를 페이지별로 그룹화
+            pages_dict = {}
+            for elem in elements_list:
+                page_num = elem.get("page", 1)
+                if page_num not in pages_dict:
+                    pages_dict[page_num] = []
+                
+                content_obj = elem.get("content", {})
+                if isinstance(content_obj, dict):
+                    elem_text = content_obj.get("text", "") or content_obj.get("html", "")
+                else:
+                    elem_text = str(content_obj)
+                
+                if elem_text:
+                    pages_dict[page_num].append(elem_text)
+            
+            # 페이지별로 텍스트 구성
+            for page_num in sorted(pages_dict.keys())[:max_pages]:
+                structured_text += f"\n\n=== 페이지 {page_num} ===\n\n"
+                structured_text += "\n\n".join(pages_dict[page_num])
         
-        return structured_text if structured_text else text, min(num_pages, max_pages)
+        # structured_text가 없으면 content.text 사용
+        final_text = structured_text if structured_text.strip() else text
+        
+        return final_text, min(num_pages, max_pages)
         
     except requests.Timeout:
         st.error("⏱️ Upstage API 타임아웃 (대용량 PDF는 시간이 걸릴 수 있습니다)")
@@ -1295,89 +1354,147 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
         return result
     
     try:
-        # 구조화된 데이터가 있으면 우선 활용 - 표를 명확한 마크다운 형식으로 변환
+        # 구조화된 데이터가 있으면 우선 활용 - 표를 명확한 형식으로 변환
         context_info = ""
-        if structured_data:
-            # 표 데이터를 마크다운 테이블로 변환
-            if structured_data.get("tables"):
-                context_info += "\n\n===== 📊 추출된 표 데이터 (우선 참고) =====\n\n"
-                for idx, table in enumerate(structured_data['tables'][:3]):  # 최대 3개
-                    context_info += f"**[표 {idx+1}] 페이지 {table.get('page', '?')}**\n\n"
-                    
-                    # 표 내용을 더 읽기 쉽게 포맷팅
-                    table_content = table.get('content', '')
-                    if table_content:
-                        # 표 데이터가 있으면 그대로 표시
-                        context_info += f"{table_content}\n\n"
-                    
-                context_info += "**💡 표에서 재무 데이터를 우선 찾아주세요. 매출액, 영업이익 등의 수치는 표에서 가져와야 합니다.**\n"
-                context_info += "==========================================\n\n"
-            
-            # 주요 제목 요약
-            if structured_data.get("headings"):
-                heading_summary = f"\n\n[문서 구조 - 주요 제목]\n"
-                for heading in structured_data['headings'][:10]:  # 최대 10개
-                    heading_summary += f"- {heading['content']}\n"
-                context_info += heading_summary
+        has_structured_tables = False
         
-        # 텍스트 길이 조정 - 표가 없으면 더 많은 텍스트 제공
-        if structured_data and structured_data.get("tables"):
-            text_preview = text[:2000]  # 표가 있으면 짧게
+        if structured_data:
+            # 표 데이터를 마크다운/HTML 형식으로 변환
+            if structured_data.get("tables"):
+                has_structured_tables = True
+                context_info += "\n\n" + "="*60 + "\n"
+                context_info += "📊 **구조화된 표 데이터 (최우선 참조!)**\n"
+                context_info += "="*60 + "\n\n"
+                
+                for idx, table in enumerate(structured_data['tables'][:5]):  # 최대 5개
+                    context_info += f"▶ **[표 {idx+1}] (페이지 {table.get('page', '?')})**\n\n"
+                    
+                    # HTML, Markdown, Content 순으로 시도
+                    table_html = table.get('html', '')
+                    table_markdown = table.get('markdown', '')
+                    table_content = table.get('content', '')
+                    
+                    if table_html:
+                        context_info += f"```html\n{table_html[:1000]}\n```\n\n"
+                    elif table_markdown:
+                        context_info += f"{table_markdown[:1000]}\n\n"
+                    elif table_content:
+                        context_info += f"```\n{table_content[:1000]}\n```\n\n"
+                    
+                context_info += "\n⚠️ **중요:** 재무 데이터(매출액, 영업이익 등)는 반드시 위 표에서 추출하세요!\n\n"
+                context_info += "="*60 + "\n\n"
+            
+            # 주요 제목 요약 (문서 구조 파악용)
+            if structured_data.get("headings"):
+                context_info += "\n[📑 문서 구조 - 주요 섹션]\n"
+                for heading in structured_data['headings'][:15]:  # 최대 15개
+                    heading_text = heading['content'][:100]  # 긴 제목은 자르기
+                    context_info += f"  • 페이지 {heading.get('page', '?')}: {heading_text}\n"
+                context_info += "\n"
+        
+        # 텍스트 길이 조정 - 표가 있으면 짧게, 없으면 길게
+        if has_structured_tables:
+            text_preview = text[:3000]  # 표가 있으면 텍스트는 보조 자료
         else:
-            text_preview = text[:5000]  # 표가 없으면 길게 (텍스트에서 직접 찾아야 함)
+            text_preview = text[:8000]  # 표가 없으면 텍스트에서 직접 찾아야 함
         
         # 모든 필드를 한 번에 요청
         fields_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(field_names)])
         
-        prompt = f"""다음은 기업 실적 발표 자료입니다. 아래 항목들을 정확히 찾아 추출하세요.
+        # 표가 있을 때와 없을 때 다른 프롬프트
+        if has_structured_tables:
+            extraction_guide = """
+🎯 **추출 가이드 (구조화된 표 있음)**
+
+1. **표 데이터 우선 분석**
+   - 위에 제공된 "구조화된 표 데이터"를 먼저 분석하세요
+   - HTML/Markdown 표 구조를 정확히 파싱하세요
+   - 표의 헤더(열 이름)와 데이터 행을 구분하세요
+
+2. **재무 데이터 추출 패턴**
+   - 영업이익: "Operating Profit", "영업이익" 행 찾기
+   - 영업이익률: "Operating Margin", "영업이익률" 행 (% 단위)
+   - 분기별 데이터: "24.3Q", "25.2Q", "25.3Q" 등의 열
+   - 최신 분기 데이터를 우선 추출하세요
+
+3. **단위 인식**
+   - "단위: 억원", "(억 원)" → 숫자 뒤에 "억 원" 추가
+   - "YoY(%)", "QoQ(%)" → 증감률은 % 포함
+
+4. **정확도 최우선**
+   - 표에서 정확한 숫자를 찾아 그대로 복사하세요
+   - 추측하거나 계산하지 마세요
+   - 표에 없으면 본문 텍스트에서 찾으세요
+"""
+        else:
+            extraction_guide = """
+🎯 **추출 가이드 (텍스트 기반 파싱)**
+
+1. **표 형식 텍스트 파싱**
+   - "| 구분 | 24.3Q | 25.2Q |" → 표 헤더
+   - "| 영업이익 | 561 | 390 |" → 데이터 행
+   - 파이프(|) 구분자로 열을 나눠 파싱하세요
+
+2. **섹션별 탐색 우선순위**
+   ① "Financial Results", "경영실적", "영업실적"
+   ② "재무정보", "재무현황"
+   ③ 차트 제목 및 데이터 (Chart Title, Chart Type)
+   ④ 키워드 직접 검색
+
+3. **패턴 매칭**
+   - "매출액: 2,345억 원" → "2,345억 원"
+   - "영업이익률 23.5%" → "23.5%"
+   - "24.3Q 영업이익 561억" → "561억 원 (24.3Q)"
+
+4. **실패 방지**
+   - 텍스트 전체를 꼼꼼히 스캔하세요
+   - 유사 용어도 확인: "매출액" ≈ "Sales" ≈ "Revenue"
+   - "정보 없음"은 정말 없을 때만!
+"""
+        
+        prompt = f"""당신은 기업 실적 발표 자료 분석 전문가입니다. 아래 데이터에서 요청한 항목을 **정확히** 추출하세요.
 
 {context_info}
 
-본문 텍스트:
-
+{"[본문 텍스트 - 보조 참고용]" if has_structured_tables else "[본문 텍스트 - 주 분석 대상]"}
+```
 {text_preview}
+```
 
-추출할 항목:
+---
+
+**📋 추출할 항목:**
 {fields_list}
 
-**🔥 필수 지침 - 반드시 따르세요:**
+{extraction_guide}
 
-1. **"영업이익" 추출 방법**
-   - "경영실적", "영업실적", "Financial Results" 섹션을 찾으세요
-   - 표 형식: "| 24.2Q | 24.3Q | 25.2Q | 25.3Q |" 같은 패턴
-   - 다음 줄에 있는 숫자들이 영업이익입니다
-   - 예: "| 468억 | 561억 | 390억 | 284억 |" → "24년 3분기 561억 원, 25년 2분기 390억 원, 25년 3분기 284억 원"
-   - 최신 분기 데이터를 우선 추출하세요
+5. **출력 형식 (엄격히 준수!)**
+   ```
+   [항목명]: 추출된 값
+   ```
+   
+   ✅ 올바른 예시:
+   ```
+   [영업이익]: 561억 원 (24.3Q), 390억 원 (25.2Q)
+   [영업이익률]: 23.5% (24.3Q), 18.2% (25.2Q)
+   [기업명]: EcoPro
+   ```
+   
+   ❌ 잘못된 예시:
+   ```
+   영업이익: 추정 500억 (← 추측 금지)
+   [영업이익률] - 정보 없음 (← 표에 있는데 못 찾음)
+   ```
 
-2. **"영업이익률" 추출 방법**  
-   - 영업이익률은 보통 "%" 단위입니다
-   - 표에서 "영업이익률" 또는 "Operating Margin" 행을 찾으세요
-   - 비율 데이터: "23.5%", "15.2%" 같은 형식
+---
 
-3. **표 형식 텍스트 파싱 (중요!)**
-   - "| 구분 | 24.3Q | 25.2Q |" → 이것은 표 헤더
-   - "| 자산총계 | 2,671 | 4,379 |" → 이것은 데이터 행
-   - 요청한 키워드와 일치하는 행을 찾아 값을 추출하세요
+**⚠️ 필수 확인사항:**
+- [ ] 표 데이터를 먼저 확인했나요?
+- [ ] 정확한 숫자를 그대로 복사했나요?
+- [ ] 단위(억 원, %)를 포함했나요?
+- [ ] 여러 분기 데이터가 있으면 모두 나열했나요?
 
-4. **재무 섹션 우선 탐색**
-   - "Financial Results", "경영실적", "재무정보" 섹션부터 찾으세요
-   - 차트 제목 근처에도 데이터가 있을 수 있습니다
-   - "Chart Type: bar", "단위: 억원" 같은 힌트를 활용하세요
-
-5. **실패 방지**
-   - 텍스트 전체를 꼼꼼히 읽으세요 (처음부터 끝까지)
-   - "정보 없음"은 정말 없을 때만 사용하세요
-   - 비슷한 단어도 확인: "매출" = "매출액", "영업이익" = "Operating Profit"
-
-**출력 형식:**
-[키워드]: 값
-
-반드시 정확한 값을 찾으세요. 추측하지 마세요.
-
-반드시 다음 형식으로 답변:
-[항목명]: 추출된 내용
-
-답변:"""
+**지금 시작하세요!**"""
 
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
