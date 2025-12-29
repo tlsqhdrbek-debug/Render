@@ -1251,18 +1251,18 @@ def extract_text_with_upstage(pdf_file, max_pages=50):
         
         # 표가 인식되었을 때 상세 정보 표시
         if table_count > 0:
-            with st.expander(f"📊 인식된 표 정보 ({table_count}개)"):
-                for idx, table in enumerate(structured_elements["tables"][:3], 1):  # 최대 3개만 표시
+            with st.expander(f"📊 인식된 표 정보 ({table_count}개)", expanded=False):
+                for idx, table in enumerate(structured_elements["tables"], 1):  # 모든 표 표시
                     st.write(f"**표 {idx} (페이지 {table.get('page', '?')})**")
-                    table_content = table.get('html', '') or table.get('content', '')
+                    table_content = table.get('html', '') or table.get('markdown', '') or table.get('content', '')
                     if table_content:
                         st.text(table_content[:300] + ("..." if len(table_content) > 300 else ""))
                     st.markdown("---")
         
         # 차트가 인식되었을 때 상세 정보 표시
         if chart_count > 0:
-            with st.expander(f"📈 인식된 차트/그래프 정보 ({chart_count}개)"):
-                for idx, chart in enumerate(structured_elements["charts"][:3], 1):  # 최대 3개만 표시
+            with st.expander(f"📈 인식된 차트/그래프 정보 ({chart_count}개)", expanded=False):
+                for idx, chart in enumerate(structured_elements["charts"], 1):  # 모든 차트 표시
                     st.write(f"**차트 {idx} (페이지 {chart.get('page', '?')}) - {chart.get('category', 'unknown')}**")
                     chart_content = chart.get('content', '') or chart.get('html', '')
                     if chart_content:
@@ -1775,6 +1775,7 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
    ```
    [영업이익]: 17.6% (← 이건 비율이지 금액이 아님!)
    [영업이익]: 영업 생산성 17.6% (← 영업이익 ≠ 영업 생산성!)
+   [영업이익률]: 43억 원 (← 이건 금액이지 비율이 아님! % 필요!)
    [영업이익률]: 정보 없음 (← 표에 영업이익 43, 매출액 294가 있으면 계산 가능!)
    [매출액]: 약 300억 원 정도 (← 추측 금지! 정확한 값만!)
    [회사명]: 회사 (← 너무 불명확!)
@@ -1783,10 +1784,26 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
    [고객사]: 여러 병원 (← 구체적인 이름 필요!)
    ```
 
+**🔴 치명적 실수 예방:**
+```
+요청: [영업이익], [영업이익률]
+
+잘못된 응답 ❌:
+[영업이익률]: 43억 원  ← 필드명 착각! 영업이익률은 %여야 함!
+[영업이익]: 정보 없음  ← 표에 43억 원이 있는데 못 찾음!
+
+올바른 응답 ✅:
+[영업이익]: 43억 원 (2025.3Q)
+[영업이익률]: 14.6% (2025.3Q)  ← 43/294 × 100
+```
+
 7. **🎯 필수 검증 체크리스트:**
+   - [ ] **필드명을 정확히 확인했나요?** "영업이익"과 "영업이익률"은 다른 항목!
    - [ ] 재무 데이터(매출, 이익 등)는 표에서 확인했나요?
    - [ ] 금액 항목에 숫자+단위(억 원, 달러)를 포함했나요?
    - [ ] 비율 항목(%로 끝나는 것)에 %를 포함했나요?
+   - [ ] **"영업이익"에 %를 넣지 않았나요?**
+   - [ ] **"영업이익률"에 "억 원"을 넣지 않았나요?**
    - [ ] 본문의 "영업 생산성", "영업 효율" 등을 영업이익으로 착각하지 않았나요?
    - [ ] 기업명은 정확하고 공식 명칭인가요?
    - [ ] 사업분야는 구체적으로 작성했나요? (예: "제조업" ❌ → "의약품 제조업" ✅)
@@ -1799,11 +1816,20 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "당신은 문서에서 정확한 정보를 추출하는 전문가입니다. 반드시 '[항목명]: 내용' 형식으로 답변합니다. 모든 요청된 항목에 대해 빠짐없이 답변합니다."},
+                {"role": "system", "content": """당신은 문서에서 정확한 정보를 추출하는 전문가입니다. 
+
+⚠️ 치명적 규칙:
+1. 반드시 '[항목명]: 내용' 형식으로 답변합니다.
+2. 모든 요청된 항목에 대해 빠짐없이 답변합니다.
+3. 필드명을 절대 착각하지 마세요!
+   - "영업이익" → 금액 (예: 43억 원) 
+   - "영업이익률" → 비율 (예: 14.6%)
+   - "영업이익"에 %를 넣거나, "영업이익률"에 억 원을 넣으면 실패!
+4. 표에서 찾은 값을 정확한 항목명에 매칭하세요."""},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=1500,  # 더 많은 키워드 처리 가능하도록 증가 (800 → 1500)
-            temperature=0.1
+            temperature=0.05  # 더 결정적으로 (0.1 → 0.05)
         )
         
         result_text = response.choices[0].message.content.strip()
@@ -1838,7 +1864,45 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
             if field_name not in extracted_data:
                 extracted_data[field_name] = "정보 없음"
         
-        print(f"[DEBUG] 파싱된 데이터: {extracted_data}\n")
+        # 🔴 후처리 검증: 필드명과 값 타입 불일치 수정
+        validation_warnings = []
+        
+        for field_name, value in extracted_data.items():
+            if value == "정보 없음":
+                continue
+                
+            # 영업이익, 매출액 등 금액 필드에 %가 있으면 경고
+            if any(keyword in field_name for keyword in ["매출", "이익", "EBITDA", "CAPEX", "현금"]):
+                if "률" not in field_name and "%" in value:
+                    validation_warnings.append(f"⚠️ '{field_name}'에 비율(%)이 들어가 있습니다: {value}")
+                    # "영업이익"과 "영업이익률"이 둘 다 있는 경우 교환 시도
+                    for other_field in field_names:
+                        if other_field != field_name and "률" in other_field and field_name.replace("률", "") in other_field:
+                            # 교환
+                            temp = extracted_data[field_name]
+                            extracted_data[field_name] = extracted_data.get(other_field, "정보 없음")
+                            extracted_data[other_field] = temp
+                            validation_warnings.append(f"✅ 자동 수정: '{field_name}' ↔ '{other_field}' 값 교환")
+                            break
+            
+            # 영업이익률, 부채비율 등 비율 필드에 "억 원", "달러" 등이 있으면 경고
+            if any(keyword in field_name for keyword in ["률", "율", "비율", "ROE", "YoY", "CAGR"]):
+                if any(unit in value for unit in ["억", "원", "달러", "USD", "KRW"]):
+                    validation_warnings.append(f"⚠️ '{field_name}'에 금액 단위가 들어가 있습니다: {value}")
+                    # "영업이익"과 "영업이익률"이 둘 다 있는 경우 교환 시도
+                    for other_field in field_names:
+                        if other_field != field_name and "률" not in other_field and field_name.replace("률", "") == other_field:
+                            # 교환
+                            temp = extracted_data[field_name]
+                            extracted_data[field_name] = extracted_data.get(other_field, "정보 없음")
+                            extracted_data[other_field] = temp
+                            validation_warnings.append(f"✅ 자동 수정: '{field_name}' ↔ '{other_field}' 값 교환")
+                            break
+        
+        if validation_warnings:
+            print(f"[VALIDATION] 검증 결과:\n" + "\n".join(validation_warnings))
+        
+        print(f"[DEBUG] 최종 데이터: {extracted_data}\n")
         return extracted_data
         
     except Exception as e:
@@ -3168,7 +3232,13 @@ if is_admin:
                                 st.error(f"다운로드 실패: {e}")                
                 with admin_tab4:
                     st.markdown("### 🔍 데이터 품질 비교 분석")
-                    st.info("📊 OCR 추출 → LLM 데이터 추출 → 보고서 생성 과정을 비교하여 데이터 품질을 검증합니다")
+                    
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.info("📊 OCR 추출 → LLM 데이터 추출 → 보고서 생성 과정을 비교하여 데이터 품질을 검증합니다")
+                    with col2:
+                        if st.button("🔄 로그 새로고침", use_container_width=True):
+                            st.rerun()
                     
                     try:
                         # 데이터 품질 로그 조회
