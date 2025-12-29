@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS public.data_quality_logs (
     ocr_raw_text TEXT,  -- 전체 PDF 추출 텍스트
     ocr_structured_data JSONB,  -- 표, 제목 등 구조화된 데이터
     ocr_tables_count INTEGER,  -- 추출된 표 개수
+    ocr_charts_count INTEGER,  -- 추출된 차트/그래프 개수
     
     -- 3. LLM 추출 데이터 (각 키워드별)
     llm_extracted_data JSONB NOT NULL,  -- {"매출액": "2,345억 원", "영업이익": "551억 원", ...}

@@ -369,8 +369,9 @@ def log_data_quality(
         keywords_missing_data = len(llm_extracted_data) - keywords_with_data
         extraction_success_rate = (keywords_with_data / len(llm_extracted_data) * 100) if llm_extracted_data else 0
         
-        # 표 개수 계산
+        # 표 및 차트 개수 계산
         ocr_tables_count = len(ocr_structured_data.get('tables', [])) if ocr_structured_data else 0
+        ocr_charts_count = len(ocr_structured_data.get('charts', [])) if ocr_structured_data else 0
         
         log_data = {
             "session_id": st.session_state.current_test_session_id,
@@ -384,6 +385,7 @@ def log_data_quality(
             "ocr_raw_text": ocr_raw_text[:20000] if ocr_raw_text else None,  # 처음 20000자만 저장 (재무표 전체 포함)
             "ocr_structured_data": ocr_structured_data,
             "ocr_tables_count": ocr_tables_count,
+            "ocr_charts_count": ocr_charts_count,
             
             # 3. LLM 추출 데이터
             "llm_extracted_data": llm_extracted_data,
@@ -435,6 +437,7 @@ def generate_quality_log_txt(log_data):
     keywords_success = log_data.get('keywords_with_data', 0)
     keywords_failed = log_data.get('keywords_missing_data', 0)
     ocr_tables = log_data.get('ocr_tables_count', 0)
+    ocr_charts = log_data.get('ocr_charts_count', 0)
     
     # 키워드, OCR, LLM 데이터
     keywords = log_data.get('selected_keywords', [])
@@ -461,6 +464,7 @@ def generate_quality_log_txt(log_data):
     txt.append(f"- 성공: {keywords_success}개")
     txt.append(f"- 실패: {keywords_failed}개")
     txt.append(f"- OCR 표 인식: {ocr_tables}개")
+    txt.append(f"- OCR 차트/그래프 인식: {ocr_charts}개")
     txt.append("")
     
     # 1. 선택된 키워드
@@ -488,7 +492,7 @@ def generate_quality_log_txt(log_data):
     if structured_data and structured_data.get('tables'):
         txt.append(f"[표 데이터 - 총 {len(structured_data['tables'])}개]")
         txt.append("")
-        for idx, table in enumerate(structured_data['tables'][:10], 1):  # 최대 10개로 증가
+        for idx, table in enumerate(structured_data['tables'], 1):  # 모든 표 표시
             txt.append(f"--- 표 {idx} (페이지 {table.get('page', '?')}) ---")
             table_content = table.get('content', '내용 없음')
             txt.append(table_content[:1000])  # 각 표당 1000자로 증가 (재무표 전체 포함)
@@ -1386,23 +1390,41 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
                 context_info += "\n\n" + "="*60 + "\n"
                 context_info += "📊 **구조화된 표 데이터 (최우선 참조!)**\n"
                 context_info += "="*60 + "\n\n"
+                context_info += "⚠️ **재무 데이터는 아래 표에서만 추출하세요! 본문 텍스트 무시!**\n\n"
                 
-                for idx, table in enumerate(structured_data['tables'][:5]):  # 최대 5개
+                for idx, table in enumerate(structured_data['tables']):  # 모든 표 표시
                     context_info += f"▶ **[표 {idx+1}] (페이지 {table.get('page', '?')})**\n\n"
                     
-                    # HTML, Markdown, Content 순으로 시도
-                    table_html = table.get('html', '')
+                    # Markdown이 가장 파싱하기 쉬우므로 우선
                     table_markdown = table.get('markdown', '')
+                    table_html = table.get('html', '')
                     table_content = table.get('content', '')
                     
-                    if table_html:
-                        context_info += f"```html\n{table_html[:1000]}\n```\n\n"
-                    elif table_markdown:
-                        context_info += f"{table_markdown[:1000]}\n\n"
-                    elif table_content:
-                        context_info += f"```\n{table_content[:1000]}\n```\n\n"
+                    # 표 형식 선택 (Markdown > Content > HTML)
+                    if table_markdown and len(table_markdown) > 20:
+                        # Markdown 표를 더 명확하게 표시
+                        context_info += "```표 (Markdown 형식)\n"
+                        context_info += table_markdown[:1500]  # 증가
+                        context_info += "\n```\n\n"
+                    elif table_content and len(table_content) > 20:
+                        # Content를 구조화해서 표시
+                        context_info += "```표 (텍스트 형식)\n"
+                        context_info += table_content[:1500]  # 증가
+                        context_info += "\n```\n\n"
+                    elif table_html:
+                        context_info += "```표 (HTML 형식)\n"
+                        context_info += table_html[:1000]
+                        context_info += "\n```\n\n"
                     
-                context_info += "\n⚠️ **중요:** 재무 데이터(매출액, 영업이익 등)는 반드시 위 표에서 추출하세요!\n\n"
+                    # 표 해석 힌트 추가
+                    context_info += "💡 이 표에서 행 이름(첫 번째 열)과 값들을 정확히 매칭하세요.\n\n"
+                    
+                context_info += "\n" + "="*60 + "\n"
+                context_info += "🎯 **재무 데이터 추출 시 필수 확인:**\n"
+                context_info += "- 표에서 '영업이익' 행을 찾고 해당 열의 숫자를 추출\n"
+                context_info += "- 표에서 '매출액' 행을 찾고 해당 열의 숫자를 추출\n"
+                context_info += "- 표 상단에 '단위: 억원' 같은 표시가 있으면 모든 숫자에 단위 적용\n"
+                context_info += "- 본문에 '영업 생산성' 같은 비슷한 단어가 있어도 무시!\n"
                 context_info += "="*60 + "\n\n"
             
             # 차트/그래프 데이터 추가
@@ -1411,7 +1433,7 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
                 context_info += "📈 **인식된 차트/그래프 데이터**\n"
                 context_info += "="*60 + "\n\n"
                 
-                for idx, chart in enumerate(structured_data['charts'][:3]):  # 최대 3개
+                for idx, chart in enumerate(structured_data['charts']):  # 모든 차트 표시
                     context_info += f"▶ **[차트 {idx+1}] (페이지 {chart.get('page', '?')}) - {chart.get('category', 'chart')}**\n\n"
                     
                     chart_content = chart.get('content', '') or chart.get('html', '')
@@ -1431,9 +1453,9 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
         
         # 텍스트 길이 조정 - 표가 있으면 중간, 없으면 길게
         if has_structured_tables:
-            text_preview = text[:5000]  # 표가 있어도 재무표 전체를 포함하도록 증가
+            text_preview = text[:8000]  # 표가 있어도 충분한 컨텍스트 제공 (재무표 전체 포함)
         else:
-            text_preview = text[:10000]  # 표가 없으면 텍스트에서 직접 찾아야 함
+            text_preview = text[:15000]  # 표가 없으면 텍스트에서 직접 찾아야 하므로 더 길게
         
         # 모든 필드를 한 번에 요청
         fields_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(field_names)])
@@ -1443,53 +1465,231 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
             extraction_guide = """
 🎯 **추출 가이드 (구조화된 표 있음)**
 
-1. **표 데이터 우선 분석**
-   - 위에 제공된 "구조화된 표 데이터"를 먼저 분석하세요
+1. **⭐ 표 데이터 절대 우선!**
+   - 위에 제공된 "구조화된 표 데이터"를 **반드시 먼저** 분석하세요
+   - 본문 텍스트는 보조 참고용으로만 사용하세요
    - HTML/Markdown 표 구조를 정확히 파싱하세요
    - 표의 헤더(열 이름)와 데이터 행을 구분하세요
 
-2. **재무 데이터 추출 패턴**
-   - 영업이익: "Operating Profit", "영업이익" 행 찾기
-   - 영업이익률: "Operating Margin", "영업이익률" 행 (% 단위)
-   - 순이익: "Net Profit", "Net Income", "당기순이익", "순이익" 행 찾기
+2. **🔢 재무 데이터 추출 규칙 (엄격)**
+   
+   **💰 금액 데이터 (반드시 숫자 + 단위):**
+   - 매출액: "Revenue", "Sales", "매출액" 행 → 예: "294억 원"
+   - 영업이익: "Operating Profit", "영업이익" 행 → 예: "43억 원"
+   - 순이익: "Net Profit", "Net Income", "당기순이익" 행 → 예: "24억 원"
+   - EBITDA: "EBITDA" 행 찾기
+   - CAPEX: "CAPEX", "자본적지출", "설비투자" 행
+   - 현금흐름: "Cash Flow", "영업현금흐름", "OCF" 행
+   - ⚠️ 주의: "17.6%"는 금액이 아닙니다! 비율/백분율은 제외!
+   
+   **📊 비율 데이터 (반드시 % 포함):**
+   - 영업이익률: "Operating Margin", "영업이익률" 행 또는 (영업이익/매출액×100)
+   - 순이익률: "Net Margin", "순이익률" 행 또는 (순이익/매출액×100)
+   - 부채비율: "Debt Ratio", "부채비율" 행
+   - ROE: "ROE", "자기자본이익률" 행
+   - 성장률: "YoY", "Growth Rate", "CAGR" → 예: "+15.3%", "-9.3%"
+   
+   **⛔ 절대 금지:**
+   - "영업 생산성", "영업 효율" 등은 영업이익이 아닙니다!
+   - 본문에 "영업이익"이라는 단어가 있어도 표를 먼저 확인하세요!
+   - 추측하거나 계산하지 마세요 (표에 직접 있는 값만!)
+
+3. **🏢 기업 기본 정보 추출**
+   - 회사명/기업명/법인명: 표지, 헤더, "회사명:" 라벨 찾기
+   - 대표이사/CEO: "대표이사", "CEO", "Representative" 찾기
+   - 설립일: "설립일", "설립연도", "Founded" (YYYY-MM-DD 또는 YYYY년)
+   - 본사 위치: "본사", "Head Office", "Location", "주소"
+   - 직원 수: "임직원수", "직원수", "Employees" (숫자+명)
+   - 업종/산업분류: "업종", "Industry", "Sector"
+
+4. **🏭 사업구조 & 제품 정보**
+   - 사업분야: "사업영역", "Business Area", "주요사업" (여러 개면 쉼표로 구분)
+   - 주요 제품: "제품", "Products", "Services" (구체적 제품명)
+   - 핵심 기술: "Core Technology", "기술력", "R&D" (기술명)
+   - 시장 점유율: "Market Share", "점유율" (% 또는 순위)
+   - 고객사: "주요 고객", "거래처", "Customers" (기업명들)
+   - 경쟁우위: "강점", "Competitive Advantage", "차별화"
+
+5. **⚔️ 경쟁환경 & 리스크**
+   - 경쟁사: "경쟁업체", "Competitors" (회사명들)
+   - 시장 규모: "Market Size" (금액 + 단위)
+   - 시장 성장률: "Market Growth Rate", "CAGR" (%)
+   - 진입장벽: "Entry Barrier", "진입장벽"
+   - SWOT 분석: "Strength", "Weakness", "Opportunity", "Threat"
+   - 리스크: "Risk", "위험요인", "불확실성"
+   - 규제 이슈: "규제", "Regulation"
+
+6. **🚀 전략 & 미래 계획**
+   - 신규 사업: "New Business", "신사업"
+   - M&A: "인수합병", "M&A"
+   - 투자 계획: "투자계획", "CAPEX", "설비투자"
+   - 글로벌 진출: "해외진출", "Global Expansion"
+   - R&D: "연구개발", "R&D 투자"
+   - ESG 전략: "ESG", "지속가능경영", "탄소중립"
+
+7. **📅 분기/연도 데이터 처리**
    - 분기별 데이터: "24.3Q", "25.2Q", "25.3Q" 등의 열
-   - 최신 분기 데이터를 우선 추출하세요
-   - 재무제표는 보통 "자산총계", "부채총계", "자본총계" 다음에 손익계산서가 나옵니다
+   - 최신 분기 데이터를 우선적으로 추출하세요
+   - 여러 분기가 있으면 모두 나열: "43억 원 (25.3Q), 32억 원 (25.2Q)"
 
-3. **단위 인식**
-   - "단위: 억원", "(억 원)" → 숫자 뒤에 "억 원" 추가
-   - "YoY(%)", "QoQ(%)" → 증감률은 % 포함
+8. **📏 단위 인식 및 표기**
+   - "단위: 억원" → 모든 숫자 뒤에 "억 원" 추가
+   - "(십억 달러)" → "billion USD" 또는 "십억 달러"
+   - "%", "비율" → 백분율 데이터
+   - "명", "개", "건" → 개수 단위
 
-4. **정확도 최우선**
-   - 표에서 정확한 숫자를 찾아 그대로 복사하세요
-   - 추측하거나 계산하지 마세요
-   - 표에 없으면 본문 텍스트에서 찾으세요
+9. **✅ 검증 체크리스트:**
+   - [ ] 표에서 해당 키워드의 행을 찾았나요?
+   - [ ] 금액은 숫자+단위 형태인가요? (예: 43억 원 ✅, 17.6% ❌)
+   - [ ] 비율은 %가 포함되어 있나요?
+   - [ ] 기업 정보는 정확하고 구체적인가요?
+   - [ ] 여러 항목이 있으면 쉼표로 구분했나요?
+   - [ ] 표에 없어서 본문을 봤다면, 정말 표에 없는 게 맞나요?
 """
         else:
             extraction_guide = """
 🎯 **추출 가이드 (텍스트 기반 파싱)**
 
-1. **표 형식 텍스트 파싱**
+1. **📝 표 형식 텍스트 파싱**
    - "| 구분 | 24.3Q | 25.2Q |" → 표 헤더
    - "| 영업이익 | 561 | 390 |" → 데이터 행
    - 파이프(|) 구분자로 열을 나눠 파싱하세요
+   - 표 형식이 여러 페이지에 걸쳐 있을 수 있으니 전체 스캔
 
-2. **섹션별 탐색 우선순위**
-   ① "Financial Results", "경영실적", "영업실적", "손익계산서"
-   ② "재무정보", "재무현황", "재무상태표"
-   ③ 차트 제목 및 데이터 (Chart Title, Chart Type)
-   ④ 키워드 직접 검색
-   ⚠️ 재무표가 여러 페이지에 걸쳐 있을 수 있으니 전체를 스캔하세요
+2. **🔍 섹션별 탐색 우선순위**
+   
+   **재무 데이터:**
+   ① "Financial Results", "경영실적", "영업실적", "손익계산서", "실적 요약"
+   ② "재무정보", "재무현황", "재무상태표", "3Q Results"
+   ③ 차트 제목 및 데이터 (Chart Type: bar/line 등)
+   
+   **기업 정보:**
+   ① 첫 페이지, 표지, 헤더/푸터
+   ② "Company Overview", "기업개요", "회사소개"
+   ③ "Organization", "조직도"
+   
+   **사업 정보:**
+   ① "Business", "사업구조", "사업영역"
+   ② "Products & Services", "제품 및 서비스"
+   ③ "Core Competency", "핵심역량"
+   
+   **전략 정보:**
+   ① "Strategy", "전략", "Growth Strategy"
+   ② "Future Plans", "향후 계획"
+   ③ "Investment", "투자계획"
+   
+   ⚠️ 정보가 문서 전체에 분산되어 있을 수 있으니 전체를 스캔하세요
 
-3. **패턴 매칭**
+3. **🔢 재무 데이터 구별 (중요!)**
+   
+   **💰 금액 (숫자 + 단위 필수):**
+   - 매출액: "2,345억 원", "294억 원" (✅)
+   - 영업이익: "43억 원", "561억 원" (✅)
+   - 순이익: "24억 원", "390억 원" (✅)
+   - EBITDA: "450억 원" (✅)
+   - CAPEX: "150억 원" (✅)
+   - "17.6%"는 금액이 아닙니다! (❌)
+   
+   **📊 비율 (% 필수):**
+   - 영업이익률: "14.6%", "23.5%" (✅)
+   - 부채비율: "45.3%", "120%" (✅)
+   - ROE: "15.2%" (✅)
+   - 성장률: "+15.3%", "YoY -9.3%" (✅)
+   
+   **⛔ 혼동 주의:**
+   - "영업 생산성 17.6%" ≠ 영업이익!
+   - "영업 효율성 15%" ≠ 영업이익률!
+   - "시장 점유율 25%" ≠ 성장률!
+
+4. **🏢 기업 정보 추출 패턴**
+   
+   **회사명/기업명:**
+   - "○○주식회사", "○○(주)", "○○ Co., Ltd."
+   - 문서 상단, 로고 근처, "회사명:" 라벨
+   
+   **대표이사/CEO:**
+   - "대표이사: 홍길동"
+   - "CEO: John Doe"
+   - "Representative Director"
+   
+   **설립일:**
+   - "설립일: 1998년 3월 15일"
+   - "Founded: 1998"
+   - "Since 1998"
+   
+   **사업분야:**
+   - "주요 사업: A, B, C"
+   - "Business Areas: Manufacturing, Distribution"
+   - 여러 개면 쉼표로 구분
+   
+   **주요 제품:**
+   - 구체적인 제품명/서비스명
+   - "제품 라인업:", "Product Portfolio:"
+   
+   **고객사:**
+   - 기업명 나열: "삼성, LG, SK"
+   - "Major Clients:", "주요 거래처:"
+
+5. **⚔️ 경쟁 & 리스크 정보**
+   
+   **경쟁사:**
+   - "경쟁업체:", "Competitors:"
+   - 회사명들 나열
+   
+   **시장 규모:**
+   - "시장 규모: 5조 원"
+   - "Market Size: $5B"
+   
+   **SWOT 분석:**
+   - "강점(Strength):", "약점(Weakness):"
+   - "기회(Opportunity):", "위협(Threat):"
+   
+   **리스크:**
+   - "리스크 요인:", "Risk Factors:"
+   - "주요 위험:", "Risks:"
+
+6. **🚀 전략 & 계획 정보**
+   
+   **신규 사업:**
+   - "신사업:", "New Business:"
+   - "사업 다각화", "Diversification"
+   
+   **M&A:**
+   - "인수합병:", "M&A:"
+   - "Acquisition", "Merger"
+   
+   **투자 계획:**
+   - "투자 계획:", "Investment Plan:"
+   - "CAPEX:", "설비투자:"
+   
+   **글로벌 진출:**
+   - "해외 진출:", "Global Expansion:"
+   - "수출:", "Export:"
+
+7. **📋 패턴 매칭 예시**
    - "매출액: 2,345억 원" → "2,345억 원"
    - "영업이익률 23.5%" → "23.5%"
    - "24.3Q 영업이익 561억" → "561억 원 (24.3Q)"
+   - "| 영업이익 | 43 | 32 |" → "43억 원 (최신), 32억 원"
+   - "회사명: 동국생명과학" → "동국생명과학"
+   - "대표이사: 홍길동" → "홍길동"
+   - "주요 제품: A, B, C" → "A, B, C"
 
-4. **실패 방지**
+8. **🚫 실패 방지 전략**
    - 텍스트 전체를 꼼꼼히 스캔하세요
-   - 유사 용어도 확인: "매출액" ≈ "Sales" ≈ "Revenue"
-   - "정보 없음"은 정말 없을 때만!
+   - 유사 용어도 확인: 
+     • "매출액" = "Sales" = "Revenue" = "총매출"
+     • "영업이익" = "Operating Profit" = "Operating Income"
+     • "순이익" = "Net Profit" = "Net Income" = "당기순이익"
+     • "회사명" = "기업명" = "법인명" = "Company Name"
+     • "대표이사" = "CEO" = "대표" = "Representative"
+   - 약어도 확인:
+     • "R&D" = "연구개발"
+     • "M&A" = "인수합병"
+     • "ESG" = "환경·사회·지배구조"
+   - "정보 없음"은 정말 텍스트 어디에도 없을 때만!
+   - 단위가 표시되어 있으면 반드시 포함하세요
+   - 맥락에서 유추 가능한 정보도 활용하세요
 """
         
         prompt = f"""당신은 기업 실적 발표 자료 분석 전문가입니다. 아래 데이터에서 요청한 항목을 **정확히** 추출하세요.
@@ -1508,41 +1708,101 @@ def extract_all_keywords_batch(text, field_names, structured_data=None):
 
 {extraction_guide}
 
-5. **출력 형식 (엄격히 준수!)**
+6. **⚠️ 출력 형식 (엄격히 준수!)**
    ```
    [항목명]: 추출된 값
    ```
    
-   ✅ 올바른 예시:
+   ✅ **올바른 예시 (모든 타입):**
    ```
-   [영업이익]: 561억 원 (24.3Q), 390억 원 (25.2Q)
-   [영업이익률]: 23.5% (24.3Q), 18.2% (25.2Q)
-   [기업명]: EcoPro
+   # 재무 데이터 (금액)
+   [매출액]: 294억 원 (2025.3Q), 349억 원 (2025.2Q)
+   [영업이익]: 43억 원 (2025.3Q), 32억 원 (2025.2Q)
+   [순이익]: 24억 원 (2025.3Q), 29억 원 (2025.2Q)
+   [EBITDA]: 450억 원 (2025.3Q)
+   [CAPEX]: 150억 원 (2024년)
+   [현금흐름]: 380억 원 (영업활동)
+   
+   # 재무 데이터 (비율)
+   [영업이익률]: 14.6% (2025.3Q), 9.2% (2025.2Q)
+   [순이익률]: 8.2% (2025.3Q)
+   [부채비율]: 45.3% (2024년 말)
+   [ROE]: 15.2% (2024년)
+   [YoY]: -9.3% (매출액 기준)
+   [CAGR]: +12.5% (2020-2024)
+   
+   # 기업 기본 정보
+   [회사명]: 동국생명과학
+   [기업명]: 동국생명과학 주식회사
+   [대표이사]: 홍길동
+   [CEO]: 홍길동
+   [설립일]: 1998년 3월 15일
+   [본사 위치]: 서울특별시 강남구
+   [직원 수]: 350명 (2024년 기준)
+   [업종]: 제약업
+   [산업분류]: 의약품 제조업
+   
+   # 사업구조 & 제품
+   [사업분야]: 조영제 제조 및 판매, 의료기기 유통, 헬스케어
+   [주요 제품]: 파미레이, 메디레이, 유니레이, 가도비전
+   [핵심 기술]: First Generic 기술력, 고순도 정제 기술, 수직 계열화
+   [시장 점유율]: 국내 조영제 시장 21.4% (1위)
+   [고객사]: 서울아산병원, 삼성서울병원, 세브란스병원 등 21개 상급병원
+   [경쟁우위]: 국내 유일 수직 계열화, 최다 품목 라인업 43종
+   
+   # 경쟁환경
+   [경쟁사]: A제약, B바이오, C헬스케어
+   [시장 규모]: 국내 조영제 시장 5,000억 원 (2024년)
+   [시장 성장률]: 연평균 7.5% 성장 (2020-2024)
+   [진입장벽]: 높음 (인허가, 기술력, 유통망 필요)
+   [SWOT 분석]: 강점-기술력/시장점유율, 약점-해외매출비중, 기회-고령화/진단수요, 위협-경쟁심화
+   
+   # 리스크
+   [재무 리스크]: 환율 변동, 원재료 가격 상승
+   [운영 리스크]: 품질 이슈, 생산 차질
+   [규제 리스크]: 약가 인하 압력, 보험급여 정책 변화
+   
+   # 전략 & 미래
+   [신규 사업]: AI 진단 소프트웨어 사업 진출 (2025년)
+   [M&A]: 중소 의료기기 업체 인수 검토 중
+   [투자 계획]: 2025년 CAPEX 200억 원 (생산설비 증설)
+   [글로벌 진출]: 동남아시아 5개국 진출 (인도네시아, 베트남, 태국 등)
+   [R&D]: 연간 매출의 5.5% R&D 투자 (신규 조영제 개발)
+   [ESG 전략]: 2030년 탄소중립 달성 목표
    ```
    
-   ❌ 잘못된 예시:
+   ❌ **잘못된 예시 (절대 금지!):**
    ```
-   영업이익: 추정 500억 (← 추측 금지)
-   [영업이익률] - 정보 없음 (← 표에 있는데 못 찾음)
+   [영업이익]: 17.6% (← 이건 비율이지 금액이 아님!)
+   [영업이익]: 영업 생산성 17.6% (← 영업이익 ≠ 영업 생산성!)
+   [영업이익률]: 정보 없음 (← 표에 영업이익 43, 매출액 294가 있으면 계산 가능!)
+   [매출액]: 약 300억 원 정도 (← 추측 금지! 정확한 값만!)
+   [회사명]: 회사 (← 너무 불명확!)
+   [대표이사]: CEO (← 이름을 찾아야 함!)
+   [사업분야]: 제조업 (← 너무 일반적! 구체적으로!)
+   [고객사]: 여러 병원 (← 구체적인 이름 필요!)
    ```
 
----
+7. **🎯 필수 검증 체크리스트:**
+   - [ ] 재무 데이터(매출, 이익 등)는 표에서 확인했나요?
+   - [ ] 금액 항목에 숫자+단위(억 원, 달러)를 포함했나요?
+   - [ ] 비율 항목(%로 끝나는 것)에 %를 포함했나요?
+   - [ ] 본문의 "영업 생산성", "영업 효율" 등을 영업이익으로 착각하지 않았나요?
+   - [ ] 기업명은 정확하고 공식 명칭인가요?
+   - [ ] 사업분야는 구체적으로 작성했나요? (예: "제조업" ❌ → "의약품 제조업" ✅)
+   - [ ] 여러 항목이 있으면 쉼표로 구분했나요?
+   - [ ] 분기/연도 정보를 함께 표기했나요?
+   - [ ] 정말 정보가 없어서 "정보 없음"이라고 했나요?
 
-**⚠️ 필수 확인사항:**
-- [ ] 표 데이터를 먼저 확인했나요?
-- [ ] 정확한 숫자를 그대로 복사했나요?
-- [ ] 단위(억 원, %)를 포함했나요?
-- [ ] 여러 분기 데이터가 있으면 모두 나열했나요?
-
-**지금 시작하세요!**"""
+**🚀 지금 시작하세요! 표를 먼저 보고, 정확한 값을 추출하세요!**"""
 
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "당신은 문서에서 정확한 정보를 추출하는 전문가입니다. 반드시 '[항목명]: 내용' 형식으로 답변합니다."},
+                {"role": "system", "content": "당신은 문서에서 정확한 정보를 추출하는 전문가입니다. 반드시 '[항목명]: 내용' 형식으로 답변합니다. 모든 요청된 항목에 대해 빠짐없이 답변합니다."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=800,
+            max_tokens=1500,  # 더 많은 키워드 처리 가능하도록 증가 (800 → 1500)
             temperature=0.1
         )
         
@@ -1746,7 +2006,7 @@ def generate_report_with_openai(data_dict, report_sections=None, model="gpt-4o-m
         # 표 데이터 요약
         if structured_data.get("tables"):
             structured_context += f"\n[표 데이터 {len(structured_data['tables'])}개 인식]\n"
-            for idx, table in enumerate(structured_data['tables'][:5]):
+            for idx, table in enumerate(structured_data['tables']):
                 structured_context += f"\n표 {idx+1} (페이지 {table['page']}):\n{table['content'][:800]}\n"
         
         # 문서 구조
@@ -2397,6 +2657,35 @@ with tab2:
                 </div>
                 """, unsafe_allow_html=True)
         
+        # 구조화된 데이터 정보 표시 (표/차트)
+        if st.session_state.get('structured_data'):
+            structured_data = st.session_state.structured_data
+            table_count = len(structured_data.get("tables", []))
+            chart_count = len(structured_data.get("charts", []))
+            
+            st.markdown("---")
+            st.markdown("### 📊 구조화된 데이터 분석 결과")
+            
+            # 표 정보
+            if table_count > 0:
+                with st.expander(f"📊 인식된 표 정보 ({table_count}개)", expanded=False):
+                    for idx, table in enumerate(structured_data["tables"], 1):
+                        st.write(f"**표 {idx} (페이지 {table.get('page', '?')})**")
+                        table_content = table.get('html', '') or table.get('markdown', '') or table.get('content', '')
+                        if table_content:
+                            st.text(table_content[:300] + ("..." if len(table_content) > 300 else ""))
+                        st.markdown("---")
+            
+            # 차트 정보
+            if chart_count > 0:
+                with st.expander(f"📈 인식된 차트/그래프 정보 ({chart_count}개)", expanded=False):
+                    for idx, chart in enumerate(structured_data["charts"], 1):
+                        st.write(f"**차트 {idx} (페이지 {chart.get('page', '?')}) - {chart.get('category', 'unknown')}**")
+                        chart_content = chart.get('content', '') or chart.get('html', '')
+                        if chart_content:
+                            st.text(chart_content[:300] + ("..." if len(chart_content) > 300 else ""))
+                        st.markdown("---")
+        
         # 원본 텍스트가 있을 때만 표시 (새로 추출한 경우)
         if st.session_state.pdf_text:
             st.markdown("---")
@@ -2970,7 +3259,7 @@ if is_admin:
                                     structured_data = selected_log.get('ocr_structured_data', {})
                                     if structured_data and structured_data.get('tables'):
                                         st.markdown(f"#### 📊 인식된 표 ({len(structured_data['tables'])}개)")
-                                        for idx, table in enumerate(structured_data['tables'][:3]):
+                                        for idx, table in enumerate(structured_data['tables']):
                                             with st.expander(f"표 {idx+1} (페이지 {table.get('page', '?')})"):
                                                 st.text(table.get('content', '내용 없음')[:1000])
                                     else:
@@ -3071,6 +3360,7 @@ if is_admin:
                                 with col1:
                                     st.markdown("### 1️⃣ OCR 단계")
                                     st.metric("표 인식", f"{selected_log.get('ocr_tables_count', 0)}개")
+                                    st.metric("차트/그래프 인식", f"{selected_log.get('ocr_charts_count', 0)}개")
                                     st.metric("텍스트 길이", f"{len(selected_log.get('ocr_raw_text', ''))}자")
                                 
                                 with col2:
