@@ -360,8 +360,22 @@ def log_data_quality(
     report_generation_time_ms=None
 ):
     """데이터 품질 검증 로그 기록 - OCR, LLM 추출, 보고서 생성 비교"""
-    if not supabase_client or not st.session_state.current_test_session_id:
+    
+    # 디버깅 정보 출력
+    print(f"[DEBUG] log_data_quality 호출됨")
+    print(f"[DEBUG] supabase_client 존재: {supabase_client is not None}")
+    print(f"[DEBUG] current_test_session_id: {st.session_state.get('current_test_session_id', 'None')}")
+    
+    if not supabase_client:
+        print(f"❌ Supabase 클라이언트가 없어서 품질 로그를 저장할 수 없습니다.")
+        st.warning("⚠️ Supabase 연결이 없어 데이터 품질 로그를 저장할 수 없습니다.")
         return None
+    
+    # 세션 ID가 없으면 경고만 표시하고 계속 진행 (NULL 허용)
+    session_id = st.session_state.get('current_test_session_id', None)
+    if not session_id:
+        print(f"⚠️ 테스트 세션 ID가 없습니다. NULL로 저장됩니다.")
+        st.info("ℹ️ 테스트 세션이 없어 독립 로그로 저장됩니다.")
     
     try:
         # 추출 성공률 계산
@@ -374,7 +388,7 @@ def log_data_quality(
         ocr_charts_count = len(ocr_structured_data.get('charts', [])) if ocr_structured_data else 0
         
         log_data = {
-            "session_id": st.session_state.current_test_session_id,
+            "session_id": session_id,  # NULL 가능
             "user_name": st.session_state.user_name,
             "company_name": company_name,
             
@@ -413,12 +427,16 @@ def log_data_quality(
         if result.data and len(result.data) > 0:
             log_id = result.data[0]['id']
             print(f"✅ 데이터 품질 로그 저장 완료: {log_id}")
+            st.success(f"✅ 데이터 품질 로그 저장 완료!")
             return log_id
-        
-        return None
+        else:
+            print(f"⚠️ 데이터 품질 로그 저장: 결과 데이터가 없습니다.")
+            return None
         
     except Exception as e:
-        print(f"❌ 데이터 품질 로그 저장 실패: {e}")
+        error_msg = f"❌ 데이터 품질 로그 저장 실패: {e}"
+        print(error_msg)
+        st.error(error_msg)
         traceback.print_exc()
         return None
 
@@ -2558,7 +2576,7 @@ with tab2:
                             }, extract_time)
                             
                             # 🆕 데이터 품질 로그 기록 - OCR vs LLM 추출 비교
-                            log_data_quality(
+                            quality_log_id = log_data_quality(
                                 selected_keywords=field_names,
                                 ocr_raw_text=pdf_text,
                                 ocr_structured_data=structured_data,
@@ -2568,6 +2586,26 @@ with tab2:
                                 pdf_filename=uploaded_file.name,
                                 pdf_pages=num_pages
                             )
+                            
+                            # 디버깅 정보 표시
+                            with st.expander("🔍 데이터 품질 로그 디버깅 정보"):
+                                st.write("**품질 로그 저장 결과:**")
+                                if quality_log_id:
+                                    st.success(f"✅ 로그 ID: {quality_log_id}")
+                                else:
+                                    st.error("❌ 로그 저장 실패")
+                                
+                                st.write("**시스템 상태:**")
+                                st.json({
+                                    "supabase_client_exists": supabase_client is not None,
+                                    "current_test_session_id": st.session_state.get('current_test_session_id', 'None'),
+                                    "user_name": st.session_state.get('user_name', 'None'),
+                                    "company_name": company_name_temp,
+                                    "keywords_count": len(field_names),
+                                    "extracted_data_count": len(extracted_data),
+                                    "tables_count": len(structured_data.get('tables', [])) if structured_data else 0,
+                                    "charts_count": len(structured_data.get('charts', [])) if structured_data else 0,
+                                })
                         
                         # Supabase에 저장
                         if supabase_client:
